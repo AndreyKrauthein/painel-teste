@@ -16,6 +16,9 @@
   ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@fastify/rate-limit": "^9.1.0",
     "axios": "^1.6.8",
