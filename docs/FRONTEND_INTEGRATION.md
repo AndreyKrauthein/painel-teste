@@ -37,8 +37,8 @@ A conta foi criada no painel e as credenciais foram extraídas e estruturadas co
     "data": {
       "usuario": "91044875",
       "senha": "senha_gerada_123",
-      "url": "http://servidor.click:80",
-      "codigo": "RBOYS2",
+      "url": "http://servidor.click",
+      "codigo": "RBOYS",
       "vencimento": "06/06/2026 09:30",
       "link_lista": "http://servidor.click:80/get.php?username=91044875&password=senha_gerada_123&output=ts",
       "link_padrao": "http://servidor.click:80/get.php?username=91044875&password=senha_gerada_123&output=ts",

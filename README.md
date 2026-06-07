@@ -175,8 +175,8 @@ Gera um novo teste IPTV no painel e retorna os dados de conexão limpos.
     "data": {
       "usuario": "teste123",
       "senha": "senha_gerada",
-      "url": "http://servidor.click:80",
-      "codigo": "RBOYS2",
+      "url": "http://servidor.click",
+      "codigo": "RBOYS",
       "vencimento": "06/06/2026 09:30",
       "link_lista": "http://servidor.click:80/get.php?username=teste123&password=senha_gerada&output=ts",
       "link_padrao": "http://servidor.click:80/get.php?username=teste123&password=senha_gerada&output=ts",

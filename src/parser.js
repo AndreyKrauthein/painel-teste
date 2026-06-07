@@ -34,7 +34,7 @@ export function extractTestData(html) {
     usuario: '',
     senha: '',
     url: '',
-    codigo: 'RBOYS2',
+    codigo: 'RBOYS',
     vencimento: '',
     link_lista: '',
     link_padrao: '',
@@ -150,6 +150,17 @@ export function extractTestData(html) {
   }
   if (!result.link_ssiptv && result.link_lista) {
     result.link_ssiptv = result.link_lista;
+  }
+
+  // Normalize url field by removing the port (only from the main url field)
+  if (result.url) {
+    try {
+      const parsedUrl = new URL(result.url);
+      result.url = `${parsedUrl.protocol}//${parsedUrl.hostname}`;
+    } catch {
+      // Fallback regex replacement
+      result.url = result.url.replace(/:\d+$/, '');
+    }
   }
 
   return result;
