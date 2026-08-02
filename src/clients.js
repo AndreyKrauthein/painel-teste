@@ -1,4 +1,5 @@
 import logger from './safeLogger.js';
+import { extractToken } from './parser.js';
 
 /**
  * Busca e resolve deterministicamente o ID interno do cliente no painel fornecedor.
@@ -45,10 +46,18 @@ export async function resolverClienteFornecedor(username, cmsClient, maxAttempts
     try {
       logger.info(`Buscando cliente '${username}' via getClients. Tentativa ${attempts + 1}/${maxAttempts}...`);
       
-      // Envia via POST na rota real /ajax/getClients
+      // Obtém o token CSRF da página simpletest
+      const simpleResponse = await cmsClient.get('/clients/simpletest');
+      const token = extractToken(simpleResponse.data);
+      if (!token) {
+        logger.warn('Aviso: Token CSRF não localizado antes de enviar a busca.');
+      }
+
+      // Envia via POST na rota real /ajax/getClients com cabeçalho CSRF
       const response = await cmsClient.post('/ajax/getClients', params.toString(), {
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-CSRF-TOKEN': token || ''
         }
       });
       

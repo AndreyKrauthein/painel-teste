@@ -42,6 +42,7 @@ async function runAllTests() {
     // 1. Resolução bem-sucedida
     console.log('[Teste 1] Validando resolução bem-sucedida...');
     const mockClient1 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => ({
         data: {
           recordsFiltered: 1,
@@ -64,6 +65,7 @@ async function runAllTests() {
     // 2. Campo username contendo HTML & 3. Uso correto de raw_username
     console.log('[Teste 2] Validando username contendo HTML e comparação com raw_username...');
     const mockClient2 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => ({
         data: {
           recordsFiltered: 1,
@@ -86,6 +88,7 @@ async function runAllTests() {
     // 4. Resultado vazio (nenhuma correspondência exata)
     console.log('[Teste 3] Validando comportamento de resultado vazio (SUPPLIER_CLIENT_NOT_FOUND)...');
     const mockClient3 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => ({
         data: {
           recordsFiltered: 0,
@@ -105,6 +108,7 @@ async function runAllTests() {
     // 5. Resultado ambíguo (mais de um resultado exato)
     console.log('[Teste 4] Validando comportamento de resultado ambíguo (SUPPLIER_CLIENT_AMBIGUOUS)...');
     const mockClient4 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => ({
         data: {
           recordsFiltered: 2,
@@ -136,6 +140,7 @@ async function runAllTests() {
     console.log('[Teste 5] Validando propagação/retry na segunda tentativa...');
     let callCount = 0;
     const mockClient5 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => {
         callCount++;
         if (callCount === 1) {
@@ -164,6 +169,7 @@ async function runAllTests() {
     // 7. getClients indisponível
     console.log('[Teste 6] Validando getClients indisponível...');
     const mockClient6 = {
+      get: async () => ({ data: '<meta name="csrf-token" content="test-csrf-token">' }),
       post: async () => {
         throw new Error('500 Internal Server Error');
       }
