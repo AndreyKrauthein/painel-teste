@@ -318,21 +318,50 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
 });
 
 fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (request, reply) => {
-  try {
-    const { username } = request.params;
-    logger.info(`[Lookup Temporal] Buscando detalhes do cliente '${username}'...`);
-    const resolved = await resolverClienteFornecedor(username, cmsClient, 1, 1000);
-    return {
-      success: true,
-      resolved
-    };
-  } catch (err) {
-    logger.error(`[Lookup Temporal] Erro ao buscar: ${err.message}`);
-    return reply.status(500).send({
-      success: false,
-      error: err.message
-    });
+  const { username } = request.params;
+  const results = {};
+
+  const params = new URLSearchParams();
+  params.append('draw', '1');
+  params.append('start', '0');
+  params.append('length', '10');
+  params.append('search[value]', username);
+  params.append('search[regex]', 'false');
+  params.append('order[0][column]', '0');
+  params.append('order[0][dir]', 'desc');
+  for (let i = 0; i < 5; i++) {
+    params.append(`columns[${i}][data]`, i === 0 ? 'id' : (i === 1 ? 'username' : 'status'));
+    params.append(`columns[${i}][name]`, '');
+    params.append(`columns[${i}][searchable]`, 'true');
+    params.append(`columns[${i}][orderable]`, 'true');
+    params.append(`columns[${i}][search][value]`, '');
+    params.append(`columns[${i}][search][regex]`, 'false');
   }
+
+  for (const route of ['/clients/getClients', '/clients/getclients']) {
+    try {
+      logger.info(`[Lookup Temporal] Testando rota ${route} para usuario ${username}...`);
+      const response = await cmsClient.get(`${route}?${params.toString()}`);
+      const finalUrl = response.request?.res?.responseUrl || '';
+      
+      if (finalUrl.includes('/login')) {
+        results[route] = { status: 'redirect_to_login', finalUrl };
+      } else {
+        results[route] = { status: response.status, data: response.data };
+      }
+    } catch (err) {
+      results[route] = {
+        status: err.response ? err.response.status : 'network_error',
+        error: err.message,
+        data: err.response ? err.response.data : null
+      };
+    }
+  }
+
+  return {
+    success: true,
+    results
+  };
 });
 
 /**
