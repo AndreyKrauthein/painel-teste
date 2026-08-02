@@ -338,7 +338,17 @@ fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (
     params.append(`columns[${i}][search][regex]`, 'false');
   }
 
-  for (const route of ['/clients/getClients', '/clients/getclients']) {
+  const routesToTest = [
+    '/clients',
+    '/clients/get',
+    '/clients/get-clients',
+    '/clients/getClients',
+    '/clients/getclients',
+    '/clients/index',
+    '/clients/list'
+  ];
+
+  for (const route of routesToTest) {
     try {
       logger.info(`[Lookup Temporal] Testando rota ${route} para usuario ${username}...`);
       const response = await cmsClient.get(`${route}?${params.toString()}`);
@@ -347,13 +357,18 @@ fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (
       if (finalUrl.includes('/login')) {
         results[route] = { status: 'redirect_to_login', finalUrl };
       } else {
-        results[route] = { status: response.status, data: response.data };
+        // Se retornar JSON contendo a palavra recordsFiltered ou recordsTotal, ou data sendo array, é a rota certa!
+        const isJson = typeof response.data === 'object' || (typeof response.data === 'string' && response.data.trim().startsWith('{'));
+        results[route] = { 
+          status: response.status, 
+          isJson,
+          preview: typeof response.data === 'string' ? response.data.substring(0, 200) : response.data 
+        };
       }
     } catch (err) {
       results[route] = {
         status: err.response ? err.response.status : 'network_error',
-        error: err.message,
-        data: err.response ? err.response.data : null
+        error: err.message
       };
     }
   }
