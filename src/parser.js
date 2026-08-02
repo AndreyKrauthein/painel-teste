@@ -193,3 +193,95 @@ export function parseBrazilianDate(dateStr) {
   if (isNaN(date.getTime())) return null;
   return date.toISOString();
 }
+
+/**
+ * Realiza o parse de uma data brasileira e retorna um objeto Date.
+ *
+ * Diferença de parseBrazilianDate: retorna Date em vez de string ISO.
+ * Usado internamente pelo extender para comparações de datas.
+ *
+ * "05/08/2026 23:55:00" → new Date("2026-08-05T23:55:00-03:00")
+ *                       → .toISOString() = "2026-08-06T02:55:00.000Z"
+ *
+ * @param {string} dateStr Data no formato DD/MM/YYYY HH:mm[:ss]
+ * @returns {Date|null}
+ */
+export function parseBrazilianDateToLocal(dateStr) {
+  if (!dateStr) return null;
+  const cleaned = dateStr.trim();
+  const parts = cleaned.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!parts) return null;
+
+  const day    = parseInt(parts[1], 10);
+  const month  = parseInt(parts[2], 10) - 1;
+  const year   = parseInt(parts[3], 10);
+  const hour   = parts[4] ? parseInt(parts[4], 10) : 0;
+  const minute = parts[5] ? parseInt(parts[5], 10) : 0;
+  const second = parts[6] ? parseInt(parts[6], 10) : 0;
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const isoStr = `${year}-${pad(month + 1)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}-03:00`;
+  const date = new Date(isoStr);
+  if (isNaN(date.getTime())) return null;
+  return date;
+}
+
+/**
+ * Calcula a data-alvo de extensão (+3 dias corridos em America/Sao_Paulo).
+ *
+ * Regras:
+ * - base = max(agora, vencimentoAtual)
+ * - customDate = data civil de (base + 3 dias) em America/Sao_Paulo
+ *
+ * IMPLEMENTAÇÃO CIVIL (não usa ms):
+ * 1. Obter "YYYY-MM-DD" de base em BRT via Intl.DateTimeFormat('sv-SE').
+ * 2. Parsear como (y, m, d) — data civil pura.
+ * 3. Date.UTC(y, m-1, d+3) é aritmética civil (JS normaliza overflow de mês/ano).
+ * 4. Ler de volta com getUTC* — sem conversão de timezone.
+ *    Isso evita o problema de UTC-midnight formatar como dia anterior em BRT.
+ *
+ * Exemplos:
+ *   "02/08/2026 ..." → BRT civil "2026-08-02" → +3 → "2026-08-05" ✓
+ *   "29/08/2026 ..." → BRT civil "2026-08-29" → +3 → "2026-09-01" ✓ (virada de mês)
+ *   "30/12/2026 ..." → BRT civil "2026-12-30" → +3 → "2027-01-02" ✓ (virada de ano)
+ *   "05/08/2026 23:55:00 BRT" → ISO = 2026-08-06T02:55:00Z (regressão de timezone)
+ *
+ * @param {string|null} vencimentoAtualStr Data no formato brasileiro ou null
+ * @returns {{ base: Date, novaData: Date, customDate: string }}
+ */
+export function calcularDataExtensao(vencimentoAtualStr) {
+  const agora = new Date();
+
+  let base = agora;
+  if (vencimentoAtualStr) {
+    const vencimento = parseBrazilianDateToLocal(vencimentoAtualStr);
+    if (vencimento && vencimento > agora) {
+      base = vencimento;
+    }
+  }
+
+  // 1. Obter a data civil de 'base' em America/Sao_Paulo como "YYYY-MM-DD"
+  const brtDateStr = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Sao_Paulo'
+  }).format(base);
+  // Ex: "2026-08-05" — a data que o usuário vê no relógio de parede em BRT
+
+  // 2. Parsear como data civil
+  const [y, m, d] = brtDateStr.split('-').map(Number);
+
+  // 3. +3 dias como aritmética civil usando Date.UTC como contenedor numérico.
+  //    JS normaliza overflow: Date.UTC(2026, 7, 32) → 2026-09-01T00:00:00Z
+  const civil = new Date(Date.UTC(y, m - 1, d + 3));
+
+  // 4. Ler de volta com getUTC* para evitar conversão de timezone.
+  //    Se usarmos Intl.format(civil) em BRT, UTC midnight → dia anterior em BRT.
+  const yy = civil.getUTCFullYear();
+  const mm = String(civil.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(civil.getUTCDate()).padStart(2, '0');
+  const customDate = `${yy}-${mm}-${dd}`;
+
+  // novaData = customDate às 23:55:00 BRT (horário normalizado pelo fornecedor)
+  const novaData = new Date(`${customDate}T23:55:00-03:00`);
+
+  return { base, novaData, customDate };
+}

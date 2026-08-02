@@ -14,6 +14,8 @@ import cmsClient from './src/cmsClient.js';
 import { startKeepAliveJob, checkSessionHealth } from './src/keepAlive.js';
 import { getGenerationStats } from './src/stats.js';
 import { resolverClienteFornecedor } from './src/clients.js';
+import { extenderAcesso, recuperarOperacoesExpiradas } from './src/extender.js';
+import supabaseAdmin from './src/supabaseAdmin.js';
 
 dotenv.config();
 
@@ -317,62 +319,6 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
   }
 });
 
-fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (request, reply) => {
-  const { username } = request.params;
-  try {
-    const params = new URLSearchParams();
-    params.append('draw', '2');
-    params.append('start', '0');
-    params.append('length', '25');
-    params.append('search[value]', username);
-    params.append('search[regex]', 'false');
-    params.append('order[0][column]', '0');
-    params.append('order[0][dir]', 'desc');
-    const columnKeys = ['id', 'username', 'status', 'expire', 'max_cons', 'active_cons', 'rest', 'action'];
-    for (let i = 0; i < 8; i++) {
-      params.append(`columns[${i}][data]`, columnKeys[i] || '');
-      params.append(`columns[${i}][name]`, '');
-      params.append(`columns[${i}][searchable]`, 'true');
-      params.append(`columns[${i}][orderable]`, 'true');
-      params.append(`columns[${i}][search][value]`, '');
-      params.append(`columns[${i}][search][regex]`, 'false');
-    }
-
-    // Step 1: GET /clients/simpletest
-    const simpleRes = await cmsClient.get('/clients/simpletest');
-    const simpleUrl = simpleRes.request?.res?.responseUrl || '';
-    const token = extractToken(simpleRes.data);
-
-    // Step 2: POST /ajax/getClients
-    const response = await cmsClient.post('/ajax/getClients', params.toString(), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-CSRF-TOKEN': token || ''
-      }
-    });
-
-    const finalUrl = response.request?.res?.responseUrl || '';
-    const isJson = typeof response.data === 'object' || (typeof response.data === 'string' && response.data.trim().startsWith('{'));
-    
-    return {
-      success: true,
-      simpleTestStatus: simpleRes.status,
-      simpleTestUrl: simpleUrl,
-      hasToken: !!token,
-      postStatus: response.status,
-      postUrl: finalUrl,
-      isJson,
-      data: isJson ? response.data : (typeof response.data === 'string' ? response.data.substring(0, 500) : response.data)
-    };
-  } catch (err) {
-    return {
-      success: false,
-      error: err.message,
-      status: err.response ? err.response.status : 'network_error',
-      data: err.response ? (typeof err.response.data === 'string' ? err.response.data.substring(0, 500) : err.response.data) : null
-    };
-  }
-});
 
 /**
  * POST /gerar-teste
@@ -555,6 +501,64 @@ fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) =
   }
 });
 
+// ─── POST /acessos/estender ───────────────────────────────────────────────────
+// Estende o vencimento de um acesso no fornecedor em +3 dias corridos.
+// Idempotente via Supabase (tabela operacoes_fornecedor).
+fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, reply) => {
+  const {
+    identificador_fornecedor,
+    usuario_acesso,
+    idempotency_key,
+    usuario_id,
+    acesso_provisionado_id
+  } = request.body ?? {};
+
+  // Validação básica de presença antes de chamar o extender
+  if (!identificador_fornecedor || !usuario_acesso || !idempotency_key) {
+    return reply.status(400).send({
+      success: false,
+      error: 'INVALID_REQUEST',
+      message: 'identificador_fornecedor, usuario_acesso e idempotency_key são obrigatórios'
+    });
+  }
+
+  try {
+    const result = await extenderAcesso(
+      { identificador_fornecedor, usuario_acesso, idempotency_key, usuario_id, acesso_provisionado_id },
+      { cmsClient, db: supabaseAdmin }
+    );
+
+    const httpStatus = result.cached ? 200 : 200;
+    return reply.status(httpStatus).send({ success: true, ...result });
+
+  } catch (err) {
+    const code = err.message;
+    const httpStatus = err.status ?? 500;
+
+    // Retornos esperados (não são bugs — não logar como erro crítico)
+    const expectedCodes = [
+      'PANEL_SESSION_EXPIRED', 'PANEL_CSRF_UNAVAILABLE',
+      'SUPPLIER_CLIENT_NOT_FOUND', 'SUPPLIER_CLIENT_AMBIGUOUS', 'SUPPLIER_CLIENT_MISMATCH',
+      'SUPPLIER_INVALID_EXPIRATION', 'SUPPLIER_CONNECTIONS_UNAVAILABLE',
+      'SUPPLIER_EXTENSION_FAILED', 'SUPPLIER_EXTENSION_NOT_CONFIRMED', 'SUPPLIER_EXTENSION_UNCERTAIN',
+      'IDEMPOTENCY_KEY_REUSED', 'IDEMPOTENCY_IN_PROGRESS', 'IDEMPOTENCY_RESERVATION_FAILED',
+      'INVALID_REQUEST'
+    ];
+
+    if (!expectedCodes.includes(code)) {
+      logger.error(`[/acessos/estender] Erro inesperado:`, err);
+    } else {
+      logger.warn(`[/acessos/estender] ${code} (${httpStatus})`);
+    }
+
+    return reply.status(httpStatus).send({
+      success: false,
+      error: code,
+      message: err.details ?? code
+    });
+  }
+});
+
 // Start server
 const start = async () => {
   try {
@@ -565,6 +569,22 @@ const start = async () => {
 
     // Start background keep alive job
     startKeepAliveJob();
+
+    // Recovery de operações com locks expirados (supplier_call_started → uncertain, reserved → failed_before_call)
+    // Somente operações cujo lock REALMENTE expirou são afetadas.
+    if (supabaseAdmin) {
+      recuperarOperacoesExpiradas(supabaseAdmin).then(({ supplierCallStarted, reserved }) => {
+        if (supplierCallStarted > 0 || reserved > 0) {
+          logger.warn(
+            `[Startup] Recovery concluído: ${supplierCallStarted} uncertain, ${reserved} failed_before_call.`
+          );
+        } else {
+          logger.info('[Startup] Recovery: nenhuma operação expirada encontrada.');
+        }
+      }).catch(err => {
+        logger.warn('[Startup] Recovery falhou (não fatal):', err.message);
+      });
+    }
 
     // Trigger initial health check in background on startup
     checkSessionHealth().catch(err => {
