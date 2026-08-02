@@ -9,10 +9,11 @@ import logger from './src/safeLogger.js';
 import { checkAuth } from './src/auth.js';
 import { saveSession, loadSession, updateStatus, getStatus } from './src/sessionStore.js';
 import { acquireSlot, releaseSlot } from './src/concurrency.js';
-import { extractToken, extractTestData } from './src/parser.js';
+import { extractToken, extractTestData, parseBrazilianDate } from './src/parser.js';
 import cmsClient from './src/cmsClient.js';
 import { startKeepAliveJob, checkSessionHealth } from './src/keepAlive.js';
 import { getGenerationStats } from './src/stats.js';
+import { resolverClienteFornecedor } from './src/clients.js';
 
 dotenv.config();
 
@@ -24,7 +25,7 @@ const fastify = Fastify({
 const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX || '60', 10);
 const rateLimitWindow = process.env.RATE_LIMIT_WINDOW || '1 minute';
 
-await fastify.register(rateLimit, {
+fastify.register(rateLimit, {
   global: true,
   max: rateLimitMax,
   timeWindow: rateLimitWindow,
@@ -442,7 +443,29 @@ fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) =
       });
     }
 
-    // 5. Save history to data/generated-tests.jsonl (No password saved)
+    // 5. Resolve internal client ID using getClients
+    testData.identificador_fornecedor = null;
+    let resolvedClient = null;
+    try {
+      resolvedClient = await resolverClienteFornecedor(testData.usuario, cmsClient);
+      testData.identificador_fornecedor = resolvedClient.user_id;
+
+      // Conferência de vencimento
+      const genVencISO = parseBrazilianDate(testData.vencimento);
+      const clientsVencISO = parseBrazilianDate(resolvedClient.expires);
+      if (genVencISO && clientsVencISO) {
+        const diffMs = Math.abs(new Date(genVencISO).getTime() - new Date(clientsVencISO).getTime());
+        if (diffMs > 5000) {
+          logger.warn(`[Vencimento] Divergência detectada entre generatetest (${testData.vencimento}) e getClients (${resolvedClient.expires})`);
+        }
+      }
+    } catch (err) {
+      logger.error(`[Reconciliação Requerida] Falha ao resolver ID interno para o usuário '${testData.usuario}': ${err.message}`);
+      testData.reconciliacao_requerida = true;
+      testData.reconciliacao_erro = err.message;
+    }
+
+    // 6. Save history to data/generated-tests.jsonl (No password saved)
     try {
       const historyPath = path.resolve('data/generated-tests.jsonl');
       const historyEntry = JSON.stringify({
@@ -451,6 +474,7 @@ fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) =
         usuario: testData.usuario,
         url: testData.url || '',
         vencimento: testData.vencimento,
+        identificador_fornecedor: testData.identificador_fornecedor,
         createdAt: new Date().toISOString()
       }) + '\n';
       
@@ -461,7 +485,7 @@ fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) =
       logger.error('Erro ao salvar histórico de geração localmente:', err.message);
     }
 
-    // 6. Return Success Response
+    // 7. Return Success Response
     logger.info('Teste gerado com sucesso!');
     return {
       success: true,
@@ -478,8 +502,9 @@ fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) =
 const start = async () => {
   try {
     const port = parseInt(process.env.PORT || '3000', 10);
-    await fastify.listen({ port, host: '0.0.0.0' });
-    logger.info(`Servidor da API de testes rodando na porta ${port}`);
+    const host = process.env.HOST || '0.0.0.0';
+    await fastify.listen({ port, host });
+    logger.info(`Servidor da API de testes rodando na porta ${port} no host ${host}`);
 
     // Start background keep alive job
     startKeepAliveJob();
@@ -495,4 +520,8 @@ const start = async () => {
   }
 };
 
-start();
+if (process.env.NODE_ENV !== 'test') {
+  start();
+}
+
+export { fastify };

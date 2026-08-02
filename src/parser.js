@@ -165,3 +165,31 @@ export function extractTestData(html) {
 
   return result;
 }
+
+/**
+ * Realiza o parse explícito de uma data no formato brasileiro (DD/MM/YYYY HH:mm:ss ou DD/MM/YYYY HH:mm)
+ * considerando o timezone oficial do painel (América/São Paulo: UTC-3).
+ * 
+ * @param {string} dateStr A data em formato brasileiro.
+ * @returns {string|null} A data convertida no formato ISO (UTC).
+ */
+export function parseBrazilianDate(dateStr) {
+  if (!dateStr) return null;
+  const cleaned = dateStr.trim();
+  const parts = cleaned.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!parts) return null;
+  
+  const day = parseInt(parts[1], 10);
+  const month = parseInt(parts[2], 10) - 1; // Mês 0-indexed no JS
+  const year = parseInt(parts[3], 10);
+  const hour = parts[4] ? parseInt(parts[4], 10) : 0;
+  const minute = parts[5] ? parseInt(parts[5], 10) : 0;
+  const second = parts[6] ? parseInt(parts[6], 10) : 0;
+  
+  // Construção explícita considerando timezone oficial UTC-3
+  const pad = (n) => String(n).padStart(2, '0');
+  const isoStr = `${year}-${pad(month + 1)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}-03:00`;
+  const date = new Date(isoStr);
+  if (isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
