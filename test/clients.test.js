@@ -42,7 +42,7 @@ async function runAllTests() {
     // 1. Resolução bem-sucedida
     console.log('[Teste 1] Validando resolução bem-sucedida...');
     const mockClient1 = {
-      get: async () => ({
+      post: async () => ({
         data: {
           recordsFiltered: 1,
           data: [
@@ -50,7 +50,7 @@ async function runAllTests() {
               user_id: 3583177,
               raw_username: '14054073',
               username: '14054073',
-              expires: '02/08/2026 00:00:19'
+              expire: '02/08/2026 00:00:19'
             }
           ]
         }
@@ -64,7 +64,7 @@ async function runAllTests() {
     // 2. Campo username contendo HTML & 3. Uso correto de raw_username
     console.log('[Teste 2] Validando username contendo HTML e comparação com raw_username...');
     const mockClient2 = {
-      get: async () => ({
+      post: async () => ({
         data: {
           recordsFiltered: 1,
           data: [
@@ -72,7 +72,7 @@ async function runAllTests() {
               user_id: 3583177,
               raw_username: '14054073',
               username: '<span class="label label-success">14054073</span>',
-              expires: '02/08/2026 00:00:19'
+              expire: '02/08/2026 00:00:19'
             }
           ]
         }
@@ -86,7 +86,7 @@ async function runAllTests() {
     // 4. Resultado vazio (nenhuma correspondência exata)
     console.log('[Teste 3] Validando comportamento de resultado vazio (SUPPLIER_CLIENT_NOT_FOUND)...');
     const mockClient3 = {
-      get: async () => ({
+      post: async () => ({
         data: {
           recordsFiltered: 0,
           data: []
@@ -105,7 +105,7 @@ async function runAllTests() {
     // 5. Resultado ambíguo (mais de um resultado exato)
     console.log('[Teste 4] Validando comportamento de resultado ambíguo (SUPPLIER_CLIENT_AMBIGUOUS)...');
     const mockClient4 = {
-      get: async () => ({
+      post: async () => ({
         data: {
           recordsFiltered: 2,
           data: [
@@ -136,7 +136,7 @@ async function runAllTests() {
     console.log('[Teste 5] Validando propagação/retry na segunda tentativa...');
     let callCount = 0;
     const mockClient5 = {
-      get: async () => {
+      post: async () => {
         callCount++;
         if (callCount === 1) {
           return { data: { recordsFiltered: 0, data: [] } };
@@ -149,7 +149,7 @@ async function runAllTests() {
                 user_id: 3583177,
                 raw_username: '14054073',
                 username: '14054073',
-                expires: '02/08/2026 00:00:19'
+                expire: '02/08/2026 00:00:19'
               }
             ]
           }
@@ -164,7 +164,7 @@ async function runAllTests() {
     // 7. getClients indisponível
     console.log('[Teste 6] Validando getClients indisponível...');
     const mockClient6 = {
-      get: async () => {
+      post: async () => {
         throw new Error('500 Internal Server Error');
       }
     };
@@ -208,14 +208,6 @@ async function runAllTests() {
           request: { res: { responseUrl: 'http://cms/clients/simpletest' } }
         };
       }
-      if (url.includes('/clients/getclients')) {
-        return {
-          data: {
-            recordsFiltered: getClientsResponseData.length,
-            data: getClientsResponseData
-          }
-        };
-      }
       throw new Error(`Chamada GET não mockada para: ${url}`);
     };
 
@@ -234,6 +226,14 @@ async function runAllTests() {
             </html>
           `,
           request: { res: { responseUrl: 'http://cms/clients/generatetest' } }
+        };
+      }
+      if (url.includes('/ajax/getClients')) {
+        return {
+          data: {
+            recordsFiltered: getClientsResponseData.length,
+            data: getClientsResponseData
+          }
         };
       }
       throw new Error(`Chamada POST não mockada para: ${url}`);
@@ -282,7 +282,7 @@ async function runAllTests() {
         user_id: 3583177,
         raw_username: '14054073',
         username: '14054073',
-        expires: '03/08/2026 12:00:00'
+        expire: '03/08/2026 12:00:00'
       }
     ];
 

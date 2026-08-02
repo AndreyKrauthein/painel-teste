@@ -318,65 +318,21 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
 });
 
 fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (request, reply) => {
-  const { username } = request.params;
-  const results = {};
-
-  const params = new URLSearchParams();
-  params.append('draw', '1');
-  params.append('start', '0');
-  params.append('length', '10');
-  params.append('search[value]', username);
-  params.append('search[regex]', 'false');
-  params.append('order[0][column]', '0');
-  params.append('order[0][dir]', 'desc');
-  for (let i = 0; i < 5; i++) {
-    params.append(`columns[${i}][data]`, i === 0 ? 'id' : (i === 1 ? 'username' : 'status'));
-    params.append(`columns[${i}][name]`, '');
-    params.append(`columns[${i}][searchable]`, 'true');
-    params.append(`columns[${i}][orderable]`, 'true');
-    params.append(`columns[${i}][search][value]`, '');
-    params.append(`columns[${i}][search][regex]`, 'false');
+  try {
+    const { username } = request.params;
+    logger.info(`[Lookup Temporal] Buscando detalhes do cliente '${username}'...`);
+    const resolved = await resolverClienteFornecedor(username, cmsClient, 1, 1000);
+    return {
+      success: true,
+      resolved
+    };
+  } catch (err) {
+    logger.error(`[Lookup Temporal] Erro ao buscar: ${err.message}`);
+    return reply.status(500).send({
+      success: false,
+      error: err.message
+    });
   }
-
-  const routesToTest = [
-    '/clients',
-    '/clients/get',
-    '/clients/get-clients',
-    '/clients/getClients',
-    '/clients/getclients',
-    '/clients/index',
-    '/clients/list'
-  ];
-
-  for (const route of routesToTest) {
-    try {
-      logger.info(`[Lookup Temporal] Testando rota ${route} para usuario ${username}...`);
-      const response = await cmsClient.get(`${route}?${params.toString()}`);
-      const finalUrl = response.request?.res?.responseUrl || '';
-      
-      if (finalUrl.includes('/login')) {
-        results[route] = { status: 'redirect_to_login', finalUrl };
-      } else {
-        // Se retornar JSON contendo a palavra recordsFiltered ou recordsTotal, ou data sendo array, é a rota certa!
-        const isJson = typeof response.data === 'object' || (typeof response.data === 'string' && response.data.trim().startsWith('{'));
-        results[route] = { 
-          status: response.status, 
-          isJson,
-          preview: typeof response.data === 'string' ? response.data.substring(0, 200) : response.data 
-        };
-      }
-    } catch (err) {
-      results[route] = {
-        status: err.response ? err.response.status : 'network_error',
-        error: err.message
-      };
-    }
-  }
-
-  return {
-    success: true,
-    results
-  };
 });
 
 /**

@@ -15,18 +15,21 @@ export async function resolverClienteFornecedor(username, cmsClient, maxAttempts
     throw new Error('SUPPLIER_CLIENT_NOT_FOUND');
   }
 
+  // Constrói os parâmetros de URLSearchParams para envio como application/x-www-form-urlencoded
   const params = new URLSearchParams();
-  params.append('draw', '1');
+  params.append('draw', '2');
   params.append('start', '0');
-  params.append('length', '10');
+  params.append('length', '25');
   params.append('search[value]', username);
   params.append('search[regex]', 'false');
   params.append('order[0][column]', '0');
   params.append('order[0][dir]', 'desc');
   
-  // Envia colunas mínimas exigidas pelo contrato do DataTables
-  for (let i = 0; i < 5; i++) {
-    params.append(`columns[${i}][data]`, i === 0 ? 'id' : (i === 1 ? 'username' : 'status'));
+  // Envia as colunas mínimas exigidas (0 a 7)
+  const columnKeys = ['id', 'username', 'status', 'expire', 'max_cons', 'active_cons', 'rest', 'action'];
+  for (let i = 0; i < 8; i++) {
+    const dataName = columnKeys[i] || '';
+    params.append(`columns[${i}][data]`, dataName);
     params.append(`columns[${i}][name]`, '');
     params.append(`columns[${i}][searchable]`, 'true');
     params.append(`columns[${i}][orderable]`, 'true');
@@ -41,13 +44,19 @@ export async function resolverClienteFornecedor(username, cmsClient, maxAttempts
   while (attempts < maxAttempts) {
     try {
       logger.info(`Buscando cliente '${username}' via getClients. Tentativa ${attempts + 1}/${maxAttempts}...`);
-      const response = await cmsClient.get(`/clients/getclients?${params.toString()}`);
+      
+      // Envia via POST na rota real /ajax/getClients
+      const response = await cmsClient.post('/ajax/getClients', params.toString(), {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
       
       const json = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
+      
       if (json && Array.isArray(json.data)) {
         // Filtrar correspondência exata por raw_username para evitar falsos positivos
-        // Não usar o campo 'username' para comparação, pois ele pode conter tags HTML.
-        const matches = json.data.filter(item => item && item.raw_username === username);
+        const matches = json.data.filter(item => item && String(item.raw_username).trim() === String(username).trim());
         
         if (matches.length === 1) {
           clientResolved = matches[0];
@@ -86,6 +95,6 @@ export async function resolverClienteFornecedor(username, cmsClient, maxAttempts
   logger.info(`Cliente '${username}' resolvido com sucesso: user_id = ${clientResolved.user_id}`);
   return {
     user_id: Number(clientResolved.user_id),
-    expires: clientResolved.expires || null
+    expires: clientResolved.expire || null // Campo expire no singular
   };
 }
