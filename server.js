@@ -318,20 +318,59 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
 });
 
 fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (request, reply) => {
+  const { username } = request.params;
   try {
-    const { username } = request.params;
-    logger.info(`[Lookup Temporal] Buscando detalhes do cliente '${username}'...`);
-    const resolved = await resolverClienteFornecedor(username, cmsClient, 1, 1000);
+    const params = new URLSearchParams();
+    params.append('draw', '2');
+    params.append('start', '0');
+    params.append('length', '25');
+    params.append('search[value]', username);
+    params.append('search[regex]', 'false');
+    params.append('order[0][column]', '0');
+    params.append('order[0][dir]', 'desc');
+    const columnKeys = ['id', 'username', 'status', 'expire', 'max_cons', 'active_cons', 'rest', 'action'];
+    for (let i = 0; i < 8; i++) {
+      params.append(`columns[${i}][data]`, columnKeys[i] || '');
+      params.append(`columns[${i}][name]`, '');
+      params.append(`columns[${i}][searchable]`, 'true');
+      params.append(`columns[${i}][orderable]`, 'true');
+      params.append(`columns[${i}][search][value]`, '');
+      params.append(`columns[${i}][search][regex]`, 'false');
+    }
+
+    // Step 1: GET /clients/simpletest
+    const simpleRes = await cmsClient.get('/clients/simpletest');
+    const simpleUrl = simpleRes.request?.res?.responseUrl || '';
+    const token = extractToken(simpleRes.data);
+
+    // Step 2: POST /ajax/getClients
+    const response = await cmsClient.post('/ajax/getClients', params.toString(), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRF-TOKEN': token || ''
+      }
+    });
+
+    const finalUrl = response.request?.res?.responseUrl || '';
+    const isJson = typeof response.data === 'object' || (typeof response.data === 'string' && response.data.trim().startsWith('{'));
+    
     return {
       success: true,
-      resolved
+      simpleTestStatus: simpleRes.status,
+      simpleTestUrl: simpleUrl,
+      hasToken: !!token,
+      postStatus: response.status,
+      postUrl: finalUrl,
+      isJson,
+      data: isJson ? response.data : (typeof response.data === 'string' ? response.data.substring(0, 500) : response.data)
     };
-  } catch (err) {
-    logger.error(`[Lookup Temporal] Erro ao buscar: ${err.message}`);
-    return reply.status(500).send({
+  } catch (err: any) {
+    return {
       success: false,
-      error: err.message
-    });
+      error: err.message,
+      status: err.response ? err.response.status : 'network_error',
+      data: err.response ? (typeof err.response.data === 'string' ? err.response.data.substring(0, 500) : err.response.data) : null
+    };
   }
 });
 
