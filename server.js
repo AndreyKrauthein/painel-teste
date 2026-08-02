@@ -364,7 +364,7 @@ fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (
       isJson,
       data: isJson ? response.data : (typeof response.data === 'string' ? response.data.substring(0, 500) : response.data)
     };
-  } catch (err: any) {
+  } catch (err) {
     return {
       success: false,
       error: err.message,
