@@ -317,6 +317,24 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
   }
 });
 
+fastify.get('/admin/lookup-client/:username', { preHandler: checkAuth }, async (request, reply) => {
+  try {
+    const { username } = request.params;
+    logger.info(`[Lookup Temporal] Buscando detalhes do cliente '${username}'...`);
+    const resolved = await resolverClienteFornecedor(username, cmsClient, 1, 1000);
+    return {
+      success: true,
+      resolved
+    };
+  } catch (err) {
+    logger.error(`[Lookup Temporal] Erro ao buscar: ${err.message}`);
+    return reply.status(500).send({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 /**
  * POST /gerar-teste
  * Authenticated. Generates an IPTV test and returns structured credentials.
