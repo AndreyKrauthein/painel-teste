@@ -692,7 +692,7 @@ async function runExtenderTests() {
       `Esperado 02:55:00.000Z, recebido: ${result.data.vencimento_atual}`);
   });
 
-  await test('T29 — success=true mas getClients não confirma → uncertain (SUPPLIER_EXTENSION_NOT_CONFIRMED)', async () => {
+  await test('T29 — success=true mas getClients não confirma → uncertain (SUPPLIER_EXTENSION_UNCERTAIN)', async () => {
     const db = createDb();
     // Fornecedor retorna success=true, mas getClients na confirmação devolve data anterior
     const cms = makeCmsClient({
@@ -705,7 +705,7 @@ async function runExtenderTests() {
     });
     await assert.rejects(
       () => extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T29' }, { cmsClient: cms, db }),
-      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_NOT_CONFIRMED'); return true; }
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
     );
     const rec = db._store.get('key-T29');
     assert.equal(rec.status, 'uncertain');
@@ -785,7 +785,7 @@ async function runExtenderTests() {
       { cmsClient: cms, db }
     );
     assert.equal(result.success, false);
-    assert.equal(result.code, 'SUPPLIER_EXTENSION_NOT_CONFIRMED');
+    assert.equal(result.code, 'SUPPLIER_EXTENSION_UNCERTAIN');
     const rec = db._store.get('key-T32');
     assert.equal(rec.status, 'uncertain', 'disabled não deve virar done');
   });
@@ -866,7 +866,7 @@ async function runExtenderTests() {
     });
     await assert.rejects(
       () => extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T36' }, { cmsClient: cms, db }),
-      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_NOT_CONFIRMED'); return true; }
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
     );
     const rec = db._store.get('key-T36');
     assert.equal(rec.status, 'uncertain');
@@ -972,6 +972,132 @@ async function runExtenderTests() {
     assert.equal(extendCalled, false, 'NÃO estende novamente');
     const rec = db._store.get('cortesia_3d:9c263a4b-1333-4667-8a78-6e77fa631991');
     assert.equal(rec.status, 'done');
+  });
+
+  await test('T43 — extend retorna JSON como string e getClients confirma imediatamente → done', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        return { status: 200, data: '{"success":true,"message":"Plano extendido com sucesso!"}' };
+      }
+      return origPost(url, body, opts);
+    };
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T43' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    const rec = db._store.get('key-T43');
+    assert.equal(rec.status, 'done');
+    assert.equal(rec.erro_codigo, null);
+    assert.equal(rec.erro_detalhe_sanitizado, null);
+    assert.equal(rec.lock_expires_at, null);
+    assert.equal(rec.resultado.evidence.supplierAccepted, true);
+  });
+
+  await test('T44 — extend retorna JSON como string com BOM e getClients confirma imediatamente → done', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        return { status: 200, data: '\uFEFF{"success":true,"message":"Plano com BOM!"}' };
+      }
+      return origPost(url, body, opts);
+    };
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T44' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    const rec = db._store.get('key-T44');
+    assert.equal(rec.status, 'done');
+  });
+
+  await test('T45 — extend retorna success=true mas getClients falha/timeout → uncertain com 202', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [] // causará falha na busca de confirmação
+    });
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T45' },
+        { cmsClient: cms, db }
+      ),
+      (err) => {
+        assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN');
+        assert.equal(err.status, 202);
+        return true;
+      }
+    );
+    const rec = db._store.get('key-T45');
+    assert.equal(rec.status, 'uncertain');
+    assert.equal(rec.erro_codigo, 'SUPPLIER_EXTENSION_UNCERTAIN');
+  });
+
+  await test('T46 — extend retorna 200 com success=false → failed com 502', async () => {
+    const db = createDb();
+    const cms = makeCmsClient();
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        return { status: 200, data: { success: false, message: 'Usuario não existe ou limite atingido' } };
+      }
+      if (url.includes('/ajax/getClients')) {
+        return { data: { recordsFiltered: 1, data: [{ user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }] } };
+      }
+    };
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T46' },
+        { cmsClient: cms, db }
+      ),
+      (err) => {
+        assert.equal(err.message, 'SUPPLIER_EXTENSION_FAILED');
+        assert.equal(err.status, 502);
+        return true;
+      }
+    );
+    const rec = db._store.get('key-T46');
+    assert.equal(rec.status, 'failed');
+    assert.equal(rec.erro_codigo, 'SUPPLIER_EXTENSION_FAILED');
+  });
+
+  await test('T47 — reconciliar uncertain que possuía erro histórico limpa campos de erro', async () => {
+    const db = createDb([{
+      idempotency_key: 'key-T47', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      lock_expires_at: new Date(Date.now() - 60000).toISOString(),
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d',
+      erro_codigo: 'SUPPLIER_EXTENSION_FAILED',
+      erro_detalhe_sanitizado: 'Fornecedor retornou HTTP 200'
+    }]);
+
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T47' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    const rec = db._store.get('key-T47');
+    assert.equal(rec.status, 'done');
+    assert.equal(rec.erro_codigo, null);
+    assert.equal(rec.erro_detalhe_sanitizado, null);
+    assert.equal(rec.lock_expires_at, null);
   });
 }
 

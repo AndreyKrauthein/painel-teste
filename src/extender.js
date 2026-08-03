@@ -5,6 +5,8 @@ import {
   computeRequestHash,
   reservar,
   atualizar,
+  transicionar,
+  lerOperacao,
   recuperarOperacoesExpiradas as _recuperar
 } from './idempotency.js';
 
@@ -12,6 +14,43 @@ const TIPO = 'extensao_cortesia_3d';
 const SUPPLIER_LOCK_MS = 10 * 60 * 1000; // 10 min
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
+
+/**
+ * Normaliza o corpo retornado pelo POST /extend, aceitando:
+ * - objeto JSON;
+ * - JSON retornado como string;
+ * - string com espaços;
+ * - string com BOM.
+ */
+export function normalizarRespostaExtend(data) {
+  if (data === null || data === undefined) {
+    return null;
+  }
+  if (typeof data === 'object') {
+    return data;
+  }
+  let str = '';
+  if (Buffer.isBuffer(data)) {
+    str = data.toString('utf8');
+  } else if (typeof data === 'string') {
+    str = data;
+  } else {
+    return null;
+  }
+
+  let clean = str.trim();
+  // Remover BOM se presente
+  if (clean.charCodeAt(0) === 0xFEFF) {
+    clean = clean.substring(1).trim();
+  }
+
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    logger.warn(`[Extender] Falha ao fazer o parse da resposta extend como JSON: ${e.message}`);
+    return null;
+  }
+}
 
 /**
  * Obtém CSRF e valida sessão via GET /clients/simpletest.
@@ -127,7 +166,8 @@ async function reconciliar(db, operacao, cmsClient) {
     vencimento_anterior
   } = operacao;
 
-  logger.info(`[Extender] Reconciliando operação uncertain '${idempotency_key}'...`);
+  logger.info(`[extender][${idempotency_key}] Reconciliando operação uncertain...`);
+  logger.info(`[extender][${idempotency_key}] Estado carregado da operação: status=${operacao.status}, custom_date=${custom_date}, connections=${connections}, user_id=${identificador_fornecedor}, raw_username=${usuario_acesso}`);
 
   // A customDate pode ser um objeto Date do Postgres; normalizamos para string YYYY-MM-DD
   const customDateStr = custom_date instanceof Date
@@ -139,10 +179,10 @@ async function reconciliar(db, operacao, cmsClient) {
     csrfToken = await obterCsrf(cmsClient);
     cliente   = await buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor, csrfToken);
   } catch (err) {
-    logger.warn(`[Extender] Reconciliação falhou ao consultar fornecedor: ${err.message}`);
+    logger.warn(`[extender][${idempotency_key}] Reconciliação falhou ao consultar fornecedor: ${err.message}`);
     return {
       success: false,
-      code:    'SUPPLIER_EXTENSION_NOT_CONFIRMED',
+      code:    'SUPPLIER_EXTENSION_UNCERTAIN',
       message: 'Reconciliação: fornecedor inacessível',
       status:  202
     };
@@ -152,11 +192,14 @@ async function reconciliar(db, operacao, cmsClient) {
     cliente, identificador_fornecedor, connections, customDateStr
   );
 
+  logger.info(`[extender][${idempotency_key}] Critérios de confirmação na reconciliação: ${JSON.stringify(detalhes)}`);
+  logger.info(`[extender][${idempotency_key}] Valores reais na reconciliação: custom_date=${customDateStr}, expire=${cliente.expire}, status=${cliente.status}, max_cons=${cliente.max_cons}, user_id=${cliente.user_id}, raw_username=${cliente.raw_username}`);
+
   if (!confirmado) {
-    logger.warn(`[Extender] Reconciliação não confirmada. Detalhes: ${JSON.stringify(detalhes)}`);
+    logger.warn(`[extender][${idempotency_key}] Reconciliação não confirmada. Mantendo status uncertain.`);
     return {
       success: false,
-      code:    'SUPPLIER_EXTENSION_NOT_CONFIRMED',
+      code:    'SUPPLIER_EXTENSION_UNCERTAIN',
       message: 'Estado uncertain não pôde ser confirmado pelo fornecedor',
       status:  202
     };
@@ -170,11 +213,40 @@ async function reconciliar(db, operacao, cmsClient) {
     data_solicitada:          customDateStr,
     vencimento_atual:         expireDate.toISOString(),
     connections:              Number(connections),
-    status_fornecedor:        cliente.status
+    status_fornecedor:        cliente.status,
+    evidence: {
+      mutationDispatched: true,
+      supplierAccepted: true,
+      confirmedByGetClients: true,
+      confirmedAt: new Date().toISOString(),
+      getClientsResponseSanitized: {
+        user_id: String(cliente.user_id),
+        raw_username: String(cliente.raw_username),
+        expire: cliente.expire,
+        status: cliente.status,
+        max_cons: Number(cliente.max_cons)
+      }
+    }
   };
 
-  await atualizar(db, idempotency_key, { status: 'done', resultado });
-  logger.info(`[Extender] Reconciliação confirmada → done. Vencimento: ${resultado.vencimento_atual}`);
+  // Transição condicional: uncertain -> done
+  try {
+    await transicionar(db, idempotency_key, 'uncertain', 'done', {
+      resultado,
+      erro_codigo: null,
+      erro_detalhe_sanitizado: null,
+      lock_expires_at: null
+    });
+  } catch (err) {
+    logger.error(`[extender][${idempotency_key}] Erro ao transicionar de uncertain para done na reconciliação: ${err.message}`);
+    const op = await lerOperacao(db, idempotency_key);
+    if (op?.status === 'done') {
+      return { success: true, cached: true, data: op.resultado };
+    }
+    throw err;
+  }
+
+  logger.info(`[extender][${idempotency_key}] Reconciliação confirmada → done. Vencimento: ${resultado.vencimento_atual}`);
   return { success: true, cached: false, data: resultado };
 }
 
@@ -243,18 +315,36 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   if (!created) {
     switch (operacao.status) {
       case 'done':
-        logger.info(`[Extender] Chave '${idempotency_key}' já concluída. Retornando cache.`);
+        logger.info(`[extender][${idempotency_key}] Chave já concluída. Retornando cache.`);
         return { success: true, cached: true, data: operacao.resultado };
 
       case 'reserved':
       case 'supplier_call_started':
+        // Se o lock expirou, podemos avançar (reserved -> failed_before_call, supplier_call_started -> uncertain)
+        const isLockExpired = new Date(operacao.lock_expires_at) < new Date();
+        if (isLockExpired) {
+          if (operacao.status === 'reserved') {
+            logger.info(`[extender][${idempotency_key}] Lock de reserved expirou. Forçando re-tentativa.`);
+            await atualizar(db, idempotency_key, { status: 'failed_before_call' });
+            break; // Continua para o fluxo principal
+          } else {
+            logger.info(`[extender][${idempotency_key}] Lock de supplier_call_started expirou. Forçando reconciliação.`);
+            const updatedOp = await atualizar(db, idempotency_key, {
+              status: 'uncertain',
+              erro_codigo: 'SUPPLIER_EXTENSION_UNCERTAIN',
+              erro_detalhe_sanitizado: 'Lock supplier_call_started expirou em tempo de execução'
+            });
+            return reconciliar(db, updatedOp, cmsClient);
+          }
+        }
         throw Object.assign(new Error('IDEMPOTENCY_IN_PROGRESS'), { status: 409 });
 
       case 'uncertain':
+        logger.info(`[extender][${idempotency_key}] Fluxo entrou em Reconciliação.`);
         return reconciliar(db, operacao, cmsClient);
 
       case 'failed_before_call':
-        logger.info(`[Extender] Re-tentativa permitida para '${idempotency_key}' (failed_before_call).`);
+        logger.info(`[extender][${idempotency_key}] Fluxo entrou em Re-tentativa (failed_before_call).`);
         // Continua para o fluxo principal
         break;
 
@@ -267,6 +357,8 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       default:
         throw new Error('IDEMPOTENCY_UNKNOWN_STATE');
     }
+  } else {
+    logger.info(`[extender][${idempotency_key}] Fluxo entrou em Nova Extensão.`);
   }
 
   // ── Fluxo principal ──────────────────────────────────────────────────────────
@@ -338,12 +430,18 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
   // 11. POST /clients/{user_id}/extend
   let extendResponse;
+  let mutationDispatched = false;
+  let supplierAccepted = false;
+
   try {
     const body = new URLSearchParams();
     body.append('_token',     csrfToken);
     body.append('option',     'custom');
     body.append('customDate', customDate);
     body.append('connections', String(maxCons));
+
+    logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend. custom_date: ${customDate}, max_cons: ${maxCons}`);
+    mutationDispatched = true;
 
     extendResponse = await cmsClient.post(
       `/clients/${identificador_fornecedor}/extend`,
@@ -356,33 +454,49 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       }
     );
   } catch (networkErr) {
-    // Erro de rede/timeout — não sabemos se o fornecedor executou a mutação
+    logger.warn(`[extender][${idempotency_key}] Erro de rede no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
+    // Erro de rede/timeout após envio — não sabemos se o fornecedor executou a mutação, classificado como uncertain
     await atualizar(db, idempotency_key, {
       status:                  'uncertain',
       erro_codigo:             'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado: 'Erro de rede ao chamar /extend; estado da mutação desconhecido'
+      erro_detalhe_sanitizado: `Erro de rede ao chamar /extend: ${networkErr.message}`
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
   }
 
   // 12. Verificar resposta do /extend
-  const extendOk = extendResponse.status === 200 && extendResponse.data?.success === true;
+  logger.info(`[extender][${idempotency_key}] POST /extend retornou status HTTP ${extendResponse?.status}`);
+  
+  const normalizedData = normalizarRespostaExtend(extendResponse?.data);
+  const extendOk = extendResponse.status === 200 && normalizedData?.success === true;
+
+  if (extendOk) {
+    supplierAccepted = true;
+    logger.info(`[extender][${idempotency_key}] Extensão aceita pelo fornecedor (supplierAccepted = true).`);
+  }
 
   if (!extendOk) {
-    // 4xx = rejeição explícita (terminal: failed)
-    // 5xx ou outro = não sabemos (uncertain)
+    // 4xx ou status 200 com success=false = rejeição explícita (terminal: failed)
+    // 5xx ou outro (incluindo falha de parse) = não sabemos (uncertain)
     const isExplicitRejection =
-      extendResponse.status >= 400 && extendResponse.status < 500;
+      (extendResponse.status >= 400 && extendResponse.status < 500) ||
+      (extendResponse.status === 200 && normalizedData?.success === false);
 
     const novoStatus = isExplicitRejection ? 'failed' : 'uncertain';
+    const erroCodigo = isExplicitRejection ? 'SUPPLIER_EXTENSION_FAILED' : 'SUPPLIER_EXTENSION_UNCERTAIN';
+    const httpStatus = isExplicitRejection ? 502 : 202;
+
+    logger.warn(`[extender][${idempotency_key}] Falha no POST /extend. status=${extendResponse.status}, isExplicitRejection=${isExplicitRejection}. Mapeando para status=${novoStatus}, erro=${erroCodigo}`);
+
     await atualizar(db, idempotency_key, {
       status:                  novoStatus,
-      erro_codigo:             'SUPPLIER_EXTENSION_FAILED',
-      erro_detalhe_sanitizado: `Fornecedor retornou HTTP ${extendResponse.status}`
+      erro_codigo:             erroCodigo,
+      erro_detalhe_sanitizado: `Fornecedor retornou HTTP ${extendResponse.status} com data: ${typeof extendResponse.data === 'object' ? JSON.stringify(extendResponse.data) : String(extendResponse.data)}`
     });
+
     throw Object.assign(
-      new Error('SUPPLIER_EXTENSION_FAILED'),
-      { status: isExplicitRejection ? 502 : 502 }
+      new Error(erroCodigo),
+      { status: httpStatus }
     );
   }
 
@@ -397,7 +511,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     if (delays[i] > 0) {
       await new Promise(resolve => setTimeout(resolve, delays[i]));
     }
-    logger.info(`[Extender] Tentativa de confirmação ${i + 1}/${delays.length}...`);
+    logger.info(`[extender][${idempotency_key}] Tentativa de confirmação ${i + 1}/${delays.length}...`);
     try {
       const csrfConf = await obterCsrf(cmsClient);
       clienteConfirmado = await buscarCliente(
@@ -406,6 +520,10 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       const conf = confirmarCriterios(
         clienteConfirmado, identificador_fornecedor, maxCons, customDate
       );
+
+      logger.info(`[extender][${idempotency_key}] Critérios de confirmação da tentativa ${i + 1}: ${JSON.stringify(conf.detalhes)}`);
+      logger.info(`[extender][${idempotency_key}] Valores reais consultados: custom_date=${customDate}, expire=${clienteConfirmado.expire}, status=${clienteConfirmado.status}, max_cons=${clienteConfirmado.max_cons}, user_id=${clienteConfirmado.user_id}, raw_username=${clienteConfirmado.raw_username}`);
+
       if (conf.confirmado) {
         confirmado = true;
         novoExpire = conf.expireDate;
@@ -413,21 +531,21 @@ export async function extenderAcesso(params, { cmsClient, db }) {
         break; // Confirmado, sai do loop
       } else {
         detalhesConfirmacao = conf.detalhes;
-        logger.warn(`[Extender] Tentativa ${i + 1} de confirmação falhou. Detalhes: ${JSON.stringify(conf.detalhes)}`);
       }
     } catch (err) {
-      logger.warn(`[Extender] Tentativa ${i + 1} falhou ao obter/buscar cliente: ${err.message}`);
+      logger.warn(`[extender][${idempotency_key}] Tentativa ${i + 1} falhou ao obter/buscar cliente: ${err.message}`);
     }
   }
 
   if (!confirmado) {
-    logger.warn(`[Extender] Confirmação falhou em todas as tentativas. Detalhes: ${JSON.stringify(detalhesConfirmacao)}`);
+    logger.warn(`[extender][${idempotency_key}] Confirmação falhou em todas as tentativas. Detalhes: ${JSON.stringify(detalhesConfirmacao)}`);
+    // Se o fornecedor aceitou a extensão (supplierAccepted=true), uma falha de confirmação NUNCA retorna 502/failed
     await atualizar(db, idempotency_key, {
       status:                  'uncertain',
-      erro_codigo:             'SUPPLIER_EXTENSION_NOT_CONFIRMED',
+      erro_codigo:             'SUPPLIER_EXTENSION_UNCERTAIN',
       erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients não confirma no tempo limite'
     });
-    throw Object.assign(new Error('SUPPLIER_EXTENSION_NOT_CONFIRMED'), { status: 202 });
+    throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
   }
 
   // 14. Sucesso confirmado → done
@@ -439,12 +557,41 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     data_solicitada:          customDate,
     vencimento_atual:         novoExpire.toISOString(),
     connections:              maxCons,
-    status_fornecedor:        clienteConfirmado.status
+    status_fornecedor:        clienteConfirmado.status,
+    evidence: {
+      mutationDispatched: true,
+      supplierAccepted: true,
+      confirmedByGetClients: true,
+      confirmedAt: new Date().toISOString(),
+      getClientsResponseSanitized: {
+        user_id: String(clienteConfirmado.user_id),
+        raw_username: String(clienteConfirmado.raw_username),
+        expire: clienteConfirmado.expire,
+        status: clienteConfirmado.status,
+        max_cons: Number(clienteConfirmado.max_cons)
+      }
+    }
   };
 
-  await atualizar(db, idempotency_key, { status: 'done', resultado });
+  // Transição condicional: supplier_call_started -> done
+  try {
+    await transicionar(db, idempotency_key, 'supplier_call_started', 'done', {
+      resultado,
+      erro_codigo: null,
+      erro_detalhe_sanitizado: null,
+      lock_expires_at: null
+    });
+  } catch (err) {
+    logger.error(`[extender][${idempotency_key}] Erro ao transicionar de supplier_call_started para done: ${err.message}`);
+    const op = await lerOperacao(db, idempotency_key);
+    if (op?.status === 'done') {
+      return { success: true, cached: true, data: op.resultado };
+    }
+    throw err;
+  }
+
   logger.info(
-    `[Extender] Extensão confirmada para '${usuario_acesso}'. Novo vencimento: ${resultado.vencimento_atual}`
+    `[extender][${idempotency_key}] Extensão confirmada para '${usuario_acesso}'. Novo vencimento: ${resultado.vencimento_atual}`
   );
 
   return { success: true, cached: false, data: resultado };
@@ -452,3 +599,4 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
 // Re-exporta recuperarOperacoesExpiradas para uso no server.js
 export { _recuperar as recuperarOperacoesExpiradas };
+
