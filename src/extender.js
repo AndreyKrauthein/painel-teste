@@ -1,6 +1,6 @@
 import logger from './safeLogger.js';
 import { extractToken } from './parser.js';
-import { parseBrazilianDateToLocal, calcularDataExtensao } from './parser.js';
+import { parseBrazilianDateToLocal, calcularDataExtensao, isSupplierStatusOperational } from './parser.js';
 import {
   computeRequestHash,
   reservar,
@@ -75,7 +75,7 @@ async function buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor
   if (matches.length > 1) throw new Error('SUPPLIER_CLIENT_AMBIGUOUS');
 
   const cliente = matches[0];
-  if (Number(cliente.user_id) !== Number(identificador_fornecedor)) {
+  if (String(cliente.user_id).trim() !== String(identificador_fornecedor).trim()) {
     throw new Error('SUPPLIER_CLIENT_MISMATCH');
   }
 
@@ -85,22 +85,22 @@ async function buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor
 /**
  * Verifica se o registro confirmado satisfaz todos os critérios de confirmação.
  * - user_id correto
- * - max_cons preservado
- * - data local BRT do expire >= customDate
- * - status operacional (enabled|active)
+ * - max_cons preservado e > 0
+ * - data civil BRT do expire >= customDate
+ * - status operacional
  */
-function confirmarCriterios(cliente, identificador_fornecedor, connections, customDate) {
-  const isUserIdOk     = Number(cliente.user_id) === Number(identificador_fornecedor);
-  const isConnectionsOk = Number(cliente.max_cons) === Number(connections);
-  const isStatusOk     = ['enabled', 'active'].includes(cliente.status);
+export function confirmarCriterios(cliente, identificador_fornecedor, connections, customDate) {
+  const isUserIdOk     = String(cliente.user_id).trim() === String(identificador_fornecedor).trim();
+  const isConnectionsOk = Number(cliente.max_cons) === Number(connections) && Number(cliente.max_cons) > 0;
+  const isStatusOk     = isSupplierStatusOperational(cliente.status);
 
   const expireDate = parseBrazilianDateToLocal(cliente.expire);
   let isDateOk = false;
   if (expireDate) {
-    const expireBrt = new Intl.DateTimeFormat('sv-SE', {
+    const expireBrtStr = new Intl.DateTimeFormat('sv-SE', {
       timeZone: 'America/Sao_Paulo'
     }).format(expireDate);
-    isDateOk = expireBrt >= customDate;
+    isDateOk = expireBrtStr >= customDate;
   }
 
   return {
@@ -386,38 +386,51 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     );
   }
 
-  // 13. Consulta de confirmação após sucesso do /extend
-  let clienteConfirmado;
-  try {
-    const csrfConf = await obterCsrf(cmsClient);
-    clienteConfirmado = await buscarCliente(
-      cmsClient, usuario_acesso, identificador_fornecedor, csrfConf
-    );
-  } catch (err) {
-    await atualizar(db, idempotency_key, {
-      status:                  'uncertain',
-      erro_codigo:             'SUPPLIER_EXTENSION_NOT_CONFIRMED',
-      erro_detalhe_sanitizado: 'Extensão aceita, mas consulta de confirmação falhou'
-    });
-    throw Object.assign(new Error('SUPPLIER_EXTENSION_NOT_CONFIRMED'), { status: 202 });
-  }
+  // 13. Consultas de confirmação (retentativas curtas com backoff do getClients)
+  let clienteConfirmado = null;
+  let confirmado = false;
+  let novoExpire = null;
+  let detalhesConfirmacao = null;
 
-  // 14. Verificar critérios de confirmação
-  const { confirmado, expireDate: novoExpire, detalhes } = confirmarCriterios(
-    clienteConfirmado, identificador_fornecedor, maxCons, customDate
-  );
+  const delays = [0, 1000, 2000, 4000];
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i] > 0) {
+      await new Promise(resolve => setTimeout(resolve, delays[i]));
+    }
+    logger.info(`[Extender] Tentativa de confirmação ${i + 1}/${delays.length}...`);
+    try {
+      const csrfConf = await obterCsrf(cmsClient);
+      clienteConfirmado = await buscarCliente(
+        cmsClient, usuario_acesso, identificador_fornecedor, csrfConf
+      );
+      const conf = confirmarCriterios(
+        clienteConfirmado, identificador_fornecedor, maxCons, customDate
+      );
+      if (conf.confirmado) {
+        confirmado = true;
+        novoExpire = conf.expireDate;
+        detalhesConfirmacao = conf.detalhes;
+        break; // Confirmado, sai do loop
+      } else {
+        detalhesConfirmacao = conf.detalhes;
+        logger.warn(`[Extender] Tentativa ${i + 1} de confirmação falhou. Detalhes: ${JSON.stringify(conf.detalhes)}`);
+      }
+    } catch (err) {
+      logger.warn(`[Extender] Tentativa ${i + 1} falhou ao obter/buscar cliente: ${err.message}`);
+    }
+  }
 
   if (!confirmado) {
-    logger.warn(`[Extender] Confirmação falhou. Detalhes: ${JSON.stringify(detalhes)}`);
+    logger.warn(`[Extender] Confirmação falhou em todas as tentativas. Detalhes: ${JSON.stringify(detalhesConfirmacao)}`);
     await atualizar(db, idempotency_key, {
       status:                  'uncertain',
       erro_codigo:             'SUPPLIER_EXTENSION_NOT_CONFIRMED',
-      erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients não confirma'
+      erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients não confirma no tempo limite'
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_NOT_CONFIRMED'), { status: 202 });
   }
 
-  // 15. Sucesso confirmado → done
+  // 14. Sucesso confirmado → done
   const resultado = {
     identificador_fornecedor: String(identificador_fornecedor),
     usuario_acesso:           String(usuario_acesso),

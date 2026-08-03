@@ -7,7 +7,7 @@
 process.env.NODE_ENV = 'test';
 
 import assert from 'node:assert/strict';
-import { parseBrazilianDateToLocal, calcularDataExtensao } from '../src/parser.js';
+import { parseBrazilianDateToLocal, calcularDataExtensao, isSupplierStatusOperational } from '../src/parser.js';
 import {
   computeRequestHash,
   reservar,
@@ -15,7 +15,7 @@ import {
   lerOperacao,
   recuperarOperacoesExpiradas
 } from '../src/idempotency.js';
-import { extenderAcesso } from '../src/extender.js';
+import { extenderAcesso, confirmarCriterios } from '../src/extender.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MOCK DB BUILDER
@@ -257,7 +257,7 @@ function makeCmsClient({
   const defaultCliente = clienteData ?? {
     user_id: 3584843,
     raw_username: '54160049',
-    expire: '05/08/2026 23:55:00',
+    expire: '05/08/2035 23:55:00',
     max_cons: 1,
     status: 'enabled'
   };
@@ -371,17 +371,17 @@ async function runCalcularTests() {
   console.log('\n── Seção B: calcularDataExtensao ──');
 
   await test('T04 — caso base: 02/08 + 3 = 05/08', () => {
-    const { customDate } = calcularDataExtensao('02/08/2026 12:00:00');
-    assert.equal(customDate, '2026-08-05', `esperado 2026-08-05, recebido ${customDate}`);
+    const { customDate } = calcularDataExtensao('02/08/2035 12:00:00');
+    assert.equal(customDate, '2035-08-05', `esperado 2035-08-05, recebido ${customDate}`);
   });
 
   await test('T05 — vencimento futuro: base = vencimento_atual', () => {
     // Usa uma data muito no futuro para garantir que seja > agora
-    const future = '31/12/2030 12:00:00';
+    const future = '31/12/2038 12:00:00';
     const { base, customDate } = calcularDataExtensao(future);
     // base deve ser o vencimento, não agora
-    assert.ok(base.getFullYear() === 2030, 'base deve ser 2030');
-    assert.equal(customDate, '2031-01-03');
+    assert.ok(base.getFullYear() === 2038, 'base deve ser 2038');
+    assert.equal(customDate, '2039-01-03');
   });
 
   await test('T06 — vencimento expirado: base = agora', () => {
@@ -396,38 +396,38 @@ async function runCalcularTests() {
   });
 
   await test('T07 — virada de mês: 29/08 + 3 = 01/09', () => {
-    const { customDate } = calcularDataExtensao('29/08/2026 12:00:00');
-    assert.equal(customDate, '2026-09-01',
-      `esperado 2026-09-01, recebido ${customDate}`);
+    const { customDate } = calcularDataExtensao('29/08/2035 12:00:00');
+    assert.equal(customDate, '2035-09-01',
+      `esperado 2035-09-01, recebido ${customDate}`);
   });
 
   await test('T08 — virada de ano: 30/12 + 3 = 02/01', () => {
-    const { customDate } = calcularDataExtensao('30/12/2026 12:00:00');
-    assert.equal(customDate, '2027-01-02',
-      `esperado 2027-01-02, recebido ${customDate}`);
+    const { customDate } = calcularDataExtensao('30/12/2035 12:00:00');
+    assert.equal(customDate, '2036-01-02',
+      `esperado 2036-01-02, recebido ${customDate}`);
   });
 
   await test('T09 — formato correto YYYY-MM-DD', () => {
-    const { customDate } = calcularDataExtensao('01/01/2026 10:00:00');
+    const { customDate } = calcularDataExtensao('01/01/2035 10:00:00');
     assert.match(customDate, /^\d{4}-\d{2}-\d{2}$/, 'deve ser YYYY-MM-DD');
   });
 
-  await test('T10 — regressão: 05/08/2026 23:55 BRT = 2026-08-06T02:55:00Z', () => {
-    const { novaData } = calcularDataExtensao('02/08/2026 23:55:00');
-    // customDate = 2026-08-05, novaData = 2026-08-05T23:55:00-03:00
+  await test('T10 — regressão: 05/08/2035 23:55 BRT = 2035-08-06T02:55:00Z', () => {
+    const { novaData } = calcularDataExtensao('02/08/2035 23:55:00');
+    // customDate = 2035-08-05, novaData = 2035-08-05T23:55:00-03:00
     // Verificamos apenas que o customDate é correto (novaData depende do horário normalizado pelo fornecedor)
-    const { customDate } = calcularDataExtensao('02/08/2026 23:55:00');
-    assert.equal(customDate, '2026-08-05');
-    // E que parsear "05/08/2026 23:55:00" dá o ISO correto
-    const d = parseBrazilianDateToLocal('05/08/2026 23:55:00');
-    assert.equal(d.toISOString(), '2026-08-06T02:55:00.000Z',
-      '05/08/2026 23:55 BRT deve mapear para 2026-08-06T02:55:00.000Z');
+    const { customDate } = calcularDataExtensao('02/08/2035 23:55:00');
+    assert.equal(customDate, '2035-08-05');
+    // E que parsear "05/08/2035 23:55:00" dá o ISO correto
+    const d = parseBrazilianDateToLocal('05/08/2035 23:55:00');
+    assert.equal(d.toISOString(), '2035-08-06T02:55:00.000Z',
+      '05/08/2035 23:55 BRT deve mapear para 2035-08-06T02:55:00.000Z');
   });
 
   await test('T11 — max_cons=1 passado intacto no payload', async () => {
     const cms = makeCmsClient({
-      clienteData: { user_id: 100, raw_username: 'user1', expire: '10/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 100, raw_username: 'user1', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData: { user_id: 100, raw_username: 'user1', expire: '10/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 100, raw_username: 'user1', expire: '13/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const extendCalls = [];
     const origPost = cms.post.bind(cms);
@@ -443,8 +443,8 @@ async function runCalcularTests() {
 
   await test('T12 — max_cons=2 passado intacto no payload', async () => {
     const cms = makeCmsClient({
-      clienteData: { user_id: 200, raw_username: 'user2', expire: '10/08/2026 23:55:00', max_cons: 2, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 200, raw_username: 'user2', expire: '13/08/2026 23:55:00', max_cons: 2, status: 'enabled' }]
+      clienteData: { user_id: 200, raw_username: 'user2', expire: '10/08/2035 23:55:00', max_cons: 2, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 200, raw_username: 'user2', expire: '13/08/2035 23:55:00', max_cons: 2, status: 'enabled' }]
     });
     const extendCalls = [];
     const origPost = cms.post.bind(cms);
@@ -591,7 +591,7 @@ async function runExtenderTests() {
   await test('T22 — max_cons ausente → SUPPLIER_CONNECTIONS_UNAVAILABLE; POST não chamado', async () => {
     let extendCalled = false;
     const cms = makeCmsClient({
-      clienteData: { user_id: 300, raw_username: 'u300', expire: '05/08/2026 23:55:00', max_cons: 0, status: 'enabled' }
+      clienteData: { user_id: 300, raw_username: 'u300', expire: '05/08/2035 23:55:00', max_cons: 0, status: 'enabled' }
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => {
@@ -655,10 +655,10 @@ async function runExtenderTests() {
   await test('T27 — sucesso com confirmação → done; retorna vencimento_atual', async () => {
     const db = createDb();
     const cms = makeCmsClient({
-      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
       getClientsAfterExtend: [{
         user_id: 3584843, raw_username: '54160049',
-        expire: '05/08/2026 23:55:00', max_cons: 1, status: 'enabled'
+        expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled'
       }]
     });
     const result = await extenderAcesso(
@@ -668,9 +668,9 @@ async function runExtenderTests() {
     assert.equal(result.success, true);
     assert.equal(result.cached, false);
     assert.equal(result.data.connections, 1);
-    assert.equal(result.data.data_solicitada, '2026-08-05');
-    // 05/08/2026 23:55:00 BRT = 2026-08-06T02:55:00.000Z
-    assert.equal(result.data.vencimento_atual, '2026-08-06T02:55:00.000Z',
+    assert.equal(result.data.data_solicitada, '2035-08-05');
+    // 05/08/2035 23:55:00 BRT = 2035-08-06T02:55:00.000Z
+    assert.equal(result.data.vencimento_atual, '2035-08-06T02:55:00.000Z',
       'vencimento_atual deve corresponder a 23:55 BRT do customDate');
     const rec = db._store.get('key-T27');
     assert.equal(rec.status, 'done');
@@ -682,8 +682,8 @@ async function runExtenderTests() {
       { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T28' },
       {
         cmsClient: makeCmsClient({
-          clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-          getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+          clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+          getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
         }),
         db: createDb()
       }
@@ -696,10 +696,10 @@ async function runExtenderTests() {
     const db = createDb();
     // Fornecedor retorna success=true, mas getClients na confirmação devolve data anterior
     const cms = makeCmsClient({
-      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
       getClientsAfterExtend: [{
         user_id: 3584843, raw_username: '54160049',
-        expire: '02/08/2026 23:55:00', // data NÃO atualizada
+        expire: '02/08/2035 23:55:00', // data NÃO atualizada
         max_cons: 1, status: 'enabled'
       }]
     });
@@ -715,8 +715,8 @@ async function runExtenderTests() {
     const db = createDb();
     let extendCallCount = 0;
     const cms = makeCmsClient({
-      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => {
@@ -734,14 +734,14 @@ async function runExtenderTests() {
   });
 
   await test('T31 — vencimento posterior à custom_date satisfaz reconciliação', async () => {
-    // uncertain com custom_date = 05/08/2026
-    // expire retornado = 06/08/2026 (posterior) → ainda deve confirmar
+    // uncertain com custom_date = 05/08/2035
+    // expire retornado = 06/08/2035 (posterior) → ainda deve confirmar
     const pastLock = new Date(Date.now() - 60000).toISOString();
     const db = createDb([{
       idempotency_key: 'key-T31', status: 'uncertain',
       identificador_fornecedor: '3584843', usuario_acesso: '54160049',
-      custom_date: '2026-08-05', connections: 1,
-      vencimento_anterior: '2026-08-02T02:55:00.000Z',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
       lock_expires_at: pastLock,
       request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
       tipo: 'extensao_cortesia_3d'
@@ -749,7 +749,7 @@ async function runExtenderTests() {
     const cms = makeCmsClient({
       clienteData: {
         user_id: 3584843, raw_username: '54160049',
-        expire: '06/08/2026 23:55:00', // POSTERIOR à custom_date 05/08
+        expire: '06/08/2035 23:55:00', // POSTERIOR à custom_date 05/08
         max_cons: 1, status: 'enabled'
       }
     });
@@ -767,8 +767,8 @@ async function runExtenderTests() {
     const db = createDb([{
       idempotency_key: 'key-T32', status: 'uncertain',
       identificador_fornecedor: '3584843', usuario_acesso: '54160049',
-      custom_date: '2026-08-05', connections: 1,
-      vencimento_anterior: '2026-08-02T02:55:00.000Z',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
       lock_expires_at: pastLock,
       request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
       tipo: 'extensao_cortesia_3d'
@@ -776,7 +776,7 @@ async function runExtenderTests() {
     const cms = makeCmsClient({
       clienteData: {
         user_id: 3584843, raw_username: '54160049',
-        expire: '05/08/2026 23:55:00',
+        expire: '05/08/2035 23:55:00',
         max_cons: 1, status: 'disabled' // status não operacional
       }
     });
@@ -794,8 +794,8 @@ async function runExtenderTests() {
     let generateCalled = false;
     const db = createDb();
     const cms = makeCmsClient({
-      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => {
@@ -805,6 +805,174 @@ async function runExtenderTests() {
     await extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T33' }, { cmsClient: cms, db });
     assert.equal(generateCalled, false, 'generatetest NÃO deve ser chamado');
   });
+
+  await test('T34 — extend retorna success=true e getClients confirma imediatamente → done', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T34' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    const rec = db._store.get('key-T34');
+    assert.equal(rec.status, 'done');
+  });
+
+  await test('T35 — extend retorna success=true, primeira consulta retorna antiga e segunda retorna nova → done', async () => {
+    const db = createDb();
+    let extendCallCount = 0;
+    let getClientsConfCount = 0;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        extendCallCount++;
+        return origPost(url, body, opts);
+      }
+      if (url.includes('/ajax/getClients')) {
+        getClientsConfCount++;
+        if (getClientsConfCount === 2) {
+          // Primeira tentativa pós-extend retorna data antiga
+          return { data: { recordsFiltered: 1, data: [{ user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }] } };
+        }
+        if (getClientsConfCount >= 3) {
+          // Segunda tentativa pós-extend retorna a data estendida
+          return { data: { recordsFiltered: 1, data: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }] } };
+        }
+      }
+      return origPost(url, body, opts);
+    };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T35' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(extendCallCount, 1, 'deve ter chamado /extend exatamente 1 vez');
+    assert.equal(result.success, true, 'deve confirmar com sucesso na segunda consulta');
+    const rec = db._store.get('key-T35');
+    assert.equal(rec.status, 'done');
+  });
+
+  await test('T36 — extend retorna success=true e getClients continua antigo → uncertain', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }] // data não alterou
+    });
+    await assert.rejects(
+      () => extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T36' }, { cmsClient: cms, db }),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_NOT_CONFIRMED'); return true; }
+    );
+    const rec = db._store.get('key-T36');
+    assert.equal(rec.status, 'uncertain');
+  });
+
+  await test('T37 — replay uncertain com getClients atualizado → done sem novo POST /extend', async () => {
+    const pastLock = new Date(Date.now() - 60000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'key-T37', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      lock_expires_at: pastLock,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    
+    let extendCalled = false;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) extendCalled = true;
+      return origPost(url, body, opts);
+    };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T37' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    assert.equal(extendCalled, false, 'NÃO deve chamar POST /extend no replay');
+    const rec = db._store.get('key-T37');
+    assert.equal(rec.status, 'done');
+  });
+
+  await test('T38 — item.expire no formato DD/MM/YYYY HH:mm:ss BRT parse e confirmação', () => {
+    const d = parseBrazilianDateToLocal('05/08/2035 23:55:00 BRT');
+    assert.ok(d instanceof Date);
+    assert.equal(d.toISOString(), '2035-08-06T02:55:00.000Z');
+  });
+
+  await test('T39 — status=enabled é operacional', () => {
+    assert.equal(isSupplierStatusOperational('enabled'), true);
+    assert.equal(isSupplierStatusOperational('ACTIVE'), true);
+    assert.equal(isSupplierStatusOperational('ativo'), true);
+    assert.equal(isSupplierStatusOperational('disabled'), false);
+  });
+
+  await test('T40 — max_cons="1" é convertido corretamente', () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: '1', status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: '1', status: 'enabled' }]
+    });
+    // confirmarCriterios deve passar pois convertemos para Number
+    const c = { user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: '1', status: 'enabled' };
+    const conf = confirmarCriterios(c, '3584843', 1, '2035-08-05');
+    assert.equal(conf.confirmado, true);
+  });
+
+  await test('T41 — username com HTML é ignorado; comparação usa raw_username', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, username: '<span class="label text-danger">54160049</span>', raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, username: '<span class="label text-danger">54160049</span>', raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-T41' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+  });
+
+  await test('T42 — operação já uncertain da homologação real pode ser reconciliada', async () => {
+    const pastLock = new Date(Date.now() - 60000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'cortesia_3d:9c263a4b-1333-4667-8a78-6e77fa631991', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      lock_expires_at: pastLock,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    
+    let extendCalled = false;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) extendCalled = true;
+      return origPost(url, body, opts);
+    };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'cortesia_3d:9c263a4b-1333-4667-8a78-6e77fa631991' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    assert.equal(extendCalled, false, 'NÃO estende novamente');
+    const rec = db._store.get('cortesia_3d:9c263a4b-1333-4667-8a78-6e77fa631991');
+    assert.equal(rec.status, 'done');
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -812,7 +980,7 @@ async function runExtenderTests() {
 // ═══════════════════════════════════════════════════════════════════════════════
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║  Suite: extender + idempotency + parser (31 testes) ║');
+  console.log('║  Suite: extender + idempotency + parser (42 testes) ║');
   console.log('╚══════════════════════════════════════════════════════╝');
 
   await runParserTests();

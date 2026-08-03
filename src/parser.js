@@ -209,7 +209,8 @@ export function parseBrazilianDate(dateStr) {
 export function parseBrazilianDateToLocal(dateStr) {
   if (!dateStr) return null;
   const cleaned = dateStr.trim();
-  const parts = cleaned.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  const sanitized = cleaned.replace(/\s+[A-Z]{3,4}$/i, '').trim();
+  const parts = sanitized.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!parts) return null;
 
   const day    = parseInt(parts[1], 10);
@@ -224,6 +225,18 @@ export function parseBrazilianDateToLocal(dateStr) {
   const date = new Date(isoStr);
   if (isNaN(date.getTime())) return null;
   return date;
+}
+
+/**
+ * Verifica se o status do cliente retornado pelo fornecedor é operacional.
+ * Aceita enabled, active, ativo, habilitado de forma case-insensitive.
+ *
+ * @param {string} status
+ * @returns {boolean}
+ */
+export function isSupplierStatusOperational(status) {
+  const s = String(status || '').toLowerCase().trim();
+  return ['enabled', 'active', 'ativo', 'habilitado'].includes(s);
 }
 
 /**
