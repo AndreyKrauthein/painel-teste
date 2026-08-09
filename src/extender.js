@@ -562,7 +562,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     identificador_fornecedor: String(identificador_fornecedor),
     usuario_acesso:           String(usuario_acesso),
     vencimento_anterior:      vencimentoAnteriorISO,
-    data_base:                base.toISOString(),
+    data_base:                expireDate.toISOString(),
     data_solicitada:          customDate,
     vencimento_atual:         novoExpire.toISOString(),
     connections:              maxCons,
