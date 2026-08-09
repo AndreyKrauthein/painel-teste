@@ -153,8 +153,14 @@ export function confirmarCriterios(cliente, identificador_fornecedor, connection
 
 /**
  * Tenta confirmar uma operação em estado uncertain via getClients.
- * NÃO chama /extend novamente.
- * Se confirmado → done. Se não → mantém uncertain, retorna 202.
+ *
+ * INVARIANTES DE SEGURANÇA (nunca violar):
+ * 1. Esta função NUNCA chama /clients/{id}/extend novamente.
+ * 2. A customDate usada é SEMPRE a original salva em operacoes_fornecedor.custom_date.
+ *    Nunca recalcula dias nem data a partir do estado atual.
+ * 3. Se o GET falhar, retorna uncertain — ZERO novo POST.
+ * 4. Se vencimento_atual >= customDate original → DONE, sem nova mutação.
+ * 5. Nunca permite que +3 vire +6, nem +30 vire +60.
  */
 async function reconciliar(db, operacao, cmsClient) {
   const {
@@ -509,50 +515,52 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     );
   }
 
-  // 13. Consultas de confirmação (retentativas curtas com backoff do getClients)
+  // 13. GET único de confirmação após ~5s
+  // Aguarda ~5s para o Rboys propagar a mutação no getClients antes da 1ª consulta.
+  // Apenas 1 GET síncrono: se ainda stale → uncertain imediatamente.
+  // A confirmação posterior é delegada ao mecanismo de recovery (reconciliar),
+  // sem bloquear a rota por múltiplos segundos adicionais.
+  // Em NODE_ENV=test, o delay é 0ms para execução rápida dos testes.
+  const CONFIRM_DELAY_MS = process.env.NODE_ENV === 'test' ? 0 : 5000;
+  await new Promise(resolve => setTimeout(resolve, CONFIRM_DELAY_MS));
+
+
   let clienteConfirmado = null;
   let confirmado = false;
   let novoExpire = null;
   let detalhesConfirmacao = null;
 
-  const delays = [0, 1000, 2000, 4000];
-  for (let i = 0; i < delays.length; i++) {
-    if (delays[i] > 0) {
-      await new Promise(resolve => setTimeout(resolve, delays[i]));
-    }
-    logger.info(`[extender][${idempotency_key}] Tentativa de confirmação ${i + 1}/${delays.length}...`);
-    try {
-      const csrfConf = await obterCsrf(cmsClient);
-      clienteConfirmado = await buscarCliente(
-        cmsClient, usuario_acesso, identificador_fornecedor, csrfConf
-      );
-      const conf = confirmarCriterios(
-        clienteConfirmado, identificador_fornecedor, maxCons, customDate
-      );
+  logger.info(`[extender][${idempotency_key}] Tentativa de confirmação (1/1, após ${CONFIRM_DELAY_MS}ms)...`);
+  try {
+    const csrfConf = await obterCsrf(cmsClient);
+    clienteConfirmado = await buscarCliente(
+      cmsClient, usuario_acesso, identificador_fornecedor, csrfConf
+    );
+    const conf = confirmarCriterios(
+      clienteConfirmado, identificador_fornecedor, maxCons, customDate
+    );
 
-      logger.info(`[extender][${idempotency_key}] Critérios de confirmação da tentativa ${i + 1}: ${JSON.stringify(conf.detalhes)}`);
-      logger.info(`[extender][${idempotency_key}] Valores reais consultados: custom_date=${customDate}, expire=${clienteConfirmado.expire}, status=${clienteConfirmado.status}, max_cons=${clienteConfirmado.max_cons}, user_id=${clienteConfirmado.user_id}, raw_username=${clienteConfirmado.raw_username}`);
+    logger.info(`[extender][${idempotency_key}] Critérios de confirmação: ${JSON.stringify(conf.detalhes)}`);
+    logger.info(`[extender][${idempotency_key}] Valores reais consultados: custom_date=${customDate}, expire=${clienteConfirmado.expire}, status=${clienteConfirmado.status}, max_cons=${clienteConfirmado.max_cons}, user_id=${clienteConfirmado.user_id}, raw_username=${clienteConfirmado.raw_username}`);
 
-      if (conf.confirmado) {
-        confirmado = true;
-        novoExpire = conf.expireDate;
-        detalhesConfirmacao = conf.detalhes;
-        break; // Confirmado, sai do loop
-      } else {
-        detalhesConfirmacao = conf.detalhes;
-      }
-    } catch (err) {
-      logger.warn(`[extender][${idempotency_key}] Tentativa ${i + 1} falhou ao obter/buscar cliente: ${err.message}`);
+    if (conf.confirmado) {
+      confirmado = true;
+      novoExpire = conf.expireDate;
+      detalhesConfirmacao = conf.detalhes;
+    } else {
+      detalhesConfirmacao = conf.detalhes;
     }
+  } catch (err) {
+    logger.warn(`[extender][${idempotency_key}] Confirmação falhou ao obter/buscar cliente: ${err.message}`);
   }
 
   if (!confirmado) {
-    logger.warn(`[extender][${idempotency_key}] Confirmação falhou em todas as tentativas. Detalhes: ${JSON.stringify(detalhesConfirmacao)}`);
-    // Se o fornecedor aceitou a extensão (supplierAccepted=true), uma falha de confirmação NUNCA retorna 502/failed
+    logger.warn(`[extender][${idempotency_key}] Confirmação stale após ${CONFIRM_DELAY_MS}ms. Detalhes: ${JSON.stringify(detalhesConfirmacao)}. Delegando para recovery.`);
+    // supplierAccepted=true: nunca retorna 502/failed. Recovery via reconciliar() confirma sem novo POST.
     await atualizar(db, idempotency_key, {
       status:                  'uncertain',
       erro_codigo:             'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients não confirma no tempo limite'
+      erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients ainda stale após 5s. Aguardando recovery.'
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
   }
