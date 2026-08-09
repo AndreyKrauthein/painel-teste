@@ -7,6 +7,7 @@ import {
   atualizar,
   transicionar,
   lerOperacao,
+  claimRetryControlado,
   recuperarOperacoesExpiradas as _recuperar
 } from './idempotency.js';
 
@@ -169,7 +170,12 @@ async function reconciliar(db, operacao, cmsClient) {
     usuario_acesso,
     custom_date,
     connections,
-    vencimento_anterior
+    vencimento_anterior,
+    data_base,
+    created_at,
+    retry_controlado_disponivel_em,
+    retry_controlado_executado_em,
+    tentativas_recovery = 0
   } = operacao;
 
   logger.info(`[extender][${idempotency_key}] Reconciliando operação uncertain...`);
@@ -180,80 +186,172 @@ async function reconciliar(db, operacao, cmsClient) {
     ? custom_date.toISOString().split('T')[0]
     : String(custom_date);
 
+  // 1. TENTATIVA GET-ONLY PASSIVA (Sempre executada primeiro)
   let csrfToken, cliente;
+  let getFalhou = false;
   try {
     csrfToken = await obterCsrf(cmsClient);
     cliente   = await buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor, csrfToken);
   } catch (err) {
-    logger.warn(`[extender][${idempotency_key}] Reconciliação falhou ao consultar fornecedor: ${err.message}`);
-    return {
-      success: false,
-      code:    'SUPPLIER_EXTENSION_UNCERTAIN',
-      message: 'Reconciliação: fornecedor inacessível',
-      status:  202
-    };
+    getFalhou = true;
+    logger.warn(`[extender][${idempotency_key}] Reconciliação GET falhou ao consultar fornecedor: ${err.message}`);
   }
 
-  const { confirmado, expireDate, detalhes } = confirmarCriterios(
-    cliente, identificador_fornecedor, connections, customDateStr
-  );
+  if (!getFalhou && cliente) {
+    const { confirmado, expireDate, detalhes } = confirmarCriterios(
+      cliente, identificador_fornecedor, connections, customDateStr
+    );
 
-  logger.info(`[extender][${idempotency_key}] Critérios de confirmação na reconciliação: ${JSON.stringify(detalhes)}`);
-  logger.info(`[extender][${idempotency_key}] Valores reais na reconciliação: custom_date=${customDateStr}, expire=${cliente.expire}, status=${cliente.status}, max_cons=${cliente.max_cons}, user_id=${cliente.user_id}, raw_username=${cliente.raw_username}`);
+    logger.info(`[extender][${idempotency_key}] Critérios de confirmação na reconciliação: ${JSON.stringify(detalhes)}`);
+    logger.info(`[extender][${idempotency_key}] Valores reais na reconciliação: custom_date=${customDateStr}, expire=${cliente.expire}, status=${cliente.status}, max_cons=${cliente.max_cons}, user_id=${cliente.user_id}, raw_username=${cliente.raw_username}`);
 
-  if (!confirmado) {
-    logger.warn(`[extender][${idempotency_key}] Reconciliação não confirmada. Mantendo status uncertain.`);
-    return {
-      success: false,
-      code:    'SUPPLIER_EXTENSION_UNCERTAIN',
-      message: 'Estado uncertain não pôde ser confirmado pelo fornecedor',
-      status:  202
-    };
-  }
+    if (confirmado) {
+      const dataBaseEf = data_base ? new Date(data_base).toISOString() : (vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null);
+      const resultado = {
+        identificador_fornecedor: String(identificador_fornecedor),
+        usuario_acesso:           String(usuario_acesso),
+        vencimento_anterior:      vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null,
+        data_base:                dataBaseEf,
+        data_solicitada:          customDateStr,
+        vencimento_atual:         expireDate.toISOString(),
+        connections:              Number(connections),
+        status_fornecedor:        cliente.status,
+        evidence: {
+          mutationDispatched: true,
+          supplierAccepted: true,
+          confirmedByGetClients: true,
+          confirmedAt: new Date().toISOString(),
+          getClientsResponseSanitized: {
+            user_id: String(cliente.user_id),
+            raw_username: String(cliente.raw_username),
+            expire: cliente.expire,
+            status: cliente.status,
+            max_cons: Number(cliente.max_cons)
+          }
+        }
+      };
 
-  const resultado = {
-    identificador_fornecedor: String(identificador_fornecedor),
-    usuario_acesso:           String(usuario_acesso),
-    vencimento_anterior:      vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null,
-    data_base:                vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null,
-    data_solicitada:          customDateStr,
-    vencimento_atual:         expireDate.toISOString(),
-    connections:              Number(connections),
-    status_fornecedor:        cliente.status,
-    evidence: {
-      mutationDispatched: true,
-      supplierAccepted: true,
-      confirmedByGetClients: true,
-      confirmedAt: new Date().toISOString(),
-      getClientsResponseSanitized: {
-        user_id: String(cliente.user_id),
-        raw_username: String(cliente.raw_username),
-        expire: cliente.expire,
-        status: cliente.status,
-        max_cons: Number(cliente.max_cons)
+      try {
+        await transicionar(db, idempotency_key, 'uncertain', 'done', {
+          resultado,
+          erro_codigo: null,
+          erro_detalhe_sanitizado: null,
+          lock_expires_at: null
+        });
+      } catch (err) {
+        logger.error(`[extender][${idempotency_key}] Erro ao transicionar de uncertain para done na reconciliação: ${err.message}`);
+        const op = await lerOperacao(db, idempotency_key);
+        if (op?.status === 'done') {
+          return { success: true, cached: true, data: op.resultado };
+        }
+        throw err;
       }
-    }
-  };
 
-  // Transição condicional: uncertain -> done
-  try {
-    await transicionar(db, idempotency_key, 'uncertain', 'done', {
-      resultado,
-      erro_codigo: null,
-      erro_detalhe_sanitizado: null,
-      lock_expires_at: null
-    });
-  } catch (err) {
-    logger.error(`[extender][${idempotency_key}] Erro ao transicionar de uncertain para done na reconciliação: ${err.message}`);
-    const op = await lerOperacao(db, idempotency_key);
-    if (op?.status === 'done') {
-      return { success: true, cached: true, data: op.resultado };
+      logger.info(`[extender][${idempotency_key}] Reconciliação confirmada → done. Vencimento: ${resultado.vencimento_atual}`);
+      return { success: true, cached: false, data: resultado };
     }
-    throw err;
   }
 
-  logger.info(`[extender][${idempotency_key}] Reconciliação confirmada → done. Vencimento: ${resultado.vencimento_atual}`);
-  return { success: true, cached: false, data: resultado };
+  // 2. AVALIAÇÃO DE RETRY CONTROLADO MUTATIVO (MUTAÇÃO 2 — ÚNICA)
+  // Requisitos estritos:
+  // - GET passivo não confirmou (stale)
+  // - retry_controlado_executado_em é NULL (nunca executou o retry)
+  // - agora >= retry_controlado_disponivel_em (janela temporal de 5 min atingida)
+  const agora = new Date();
+  const disponivelEm = retry_controlado_disponivel_em ? new Date(retry_controlado_disponivel_em) : null;
+  const janelaAtingida = !disponivelEm || agora >= disponivelEm;
+
+  if (!retry_controlado_executado_em && janelaAtingida && csrfToken) {
+    // Tentar o CLAIM ATÔMICO no banco de dados para autorização exclusiva
+    const claimed = await claimRetryControlado(db, idempotency_key);
+    if (claimed) {
+      logger.info(`[extender][${idempotency_key}] Claim de retry controlado CONCEDIDO. Disparando o ÚNICO retry mutativo reenviando customDate=${customDateStr}...`);
+      try {
+        const body = new URLSearchParams();
+        body.append('_token', csrfToken);
+        body.append('option', 'custom');
+        body.append('customDate', customDateStr);
+        body.append('connections', String(connections));
+
+        const extendResponse = await cmsClient.post(
+          `/clients/${identificador_fornecedor}/extend`,
+          body.toString(),
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'X-CSRF-TOKEN': csrfToken
+            }
+          }
+        );
+
+        logger.info(`[extender][${idempotency_key}] POST de retry retornou status HTTP ${extendResponse?.status}`);
+
+        const CONFIRM_DELAY_MS = process.env.NODE_ENV === 'test' ? 0 : 5000;
+        await new Promise(resolve => setTimeout(resolve, CONFIRM_DELAY_MS));
+
+        const clientePosRetry = await buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor, csrfToken);
+        const confRetry = confirmarCriterios(clientePosRetry, identificador_fornecedor, connections, customDateStr);
+
+        if (confRetry.confirmado) {
+          const dataBaseEf = data_base ? new Date(data_base).toISOString() : (vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null);
+          const resultado = {
+            identificador_fornecedor: String(identificador_fornecedor),
+            usuario_acesso:           String(usuario_acesso),
+            vencimento_anterior:      vencimento_anterior ? new Date(vencimento_anterior).toISOString() : null,
+            data_base:                dataBaseEf,
+            data_solicitada:          customDateStr,
+            vencimento_atual:         confRetry.expireDate.toISOString(),
+            connections:              Number(connections),
+            status_fornecedor:        clientePosRetry.status,
+            evidence: {
+              mutationDispatched: true,
+              supplierAccepted: true,
+              confirmedByGetClients: true,
+              confirmedAt: new Date().toISOString(),
+              controlledRetryExecuted: true,
+              getClientsResponseSanitized: {
+                user_id: String(clientePosRetry.user_id),
+                raw_username: String(clientePosRetry.raw_username),
+                expire: clientePosRetry.expire,
+                status: clientePosRetry.status,
+                max_cons: Number(clientePosRetry.max_cons)
+              }
+            }
+          };
+
+          try {
+            await transicionar(db, idempotency_key, 'uncertain', 'done', {
+              resultado,
+              erro_codigo: null,
+              erro_detalhe_sanitizado: null,
+              lock_expires_at: null
+            });
+          } catch (err) {
+            const op = await lerOperacao(db, idempotency_key);
+            if (op?.status === 'done') {
+              return { success: true, cached: true, data: op.resultado };
+            }
+            throw err;
+          }
+
+          logger.info(`[extender][${idempotency_key}] Reconciliação pós-retry confirmada → done. Vencimento: ${resultado.vencimento_atual}`);
+          return { success: true, cached: false, data: resultado };
+        }
+      } catch (retryErr) {
+        logger.warn(`[extender][${idempotency_key}] Erro no POST/confirmação do retry controlado: ${retryErr.message}`);
+      }
+    } else {
+      logger.info(`[extender][${idempotency_key}] Claim de retry recusado (outro worker já assumiu ou executou).`);
+    }
+  }
+
+  logger.warn(`[extender][${idempotency_key}] Reconciliação não confirmada. Mantendo status uncertain.`);
+  return {
+    success: false,
+    code:    'SUPPLIER_EXTENSION_UNCERTAIN',
+    message: 'Estado uncertain não pôde ser confirmado pelo fornecedor',
+    status:  202
+  };
 }
 
 // ─── Entrada pública ───────────────────────────────────────────────────────────
@@ -428,16 +526,22 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   // 9. Calcular data de extensão parametrizada
   const diasEfetivos = Number.isInteger(Number(dias || duracao_dias)) && Number(dias || duracao_dias) > 0 ? Number(dias || duracao_dias) : 3;
   let customDate = customDateParam || customDateParamAlt;
+  const calc = calcularDataExtensao(expireRaw, diasEfetivos);
   if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
-    const calc = calcularDataExtensao(expireRaw, diasEfetivos);
     customDate = calc.customDate;
   }
   const vencimentoAnteriorISO = expireDate.toISOString();
+  const dataBaseISO = calc.base.toISOString();
+
+  // Helper para cálculo da disponibilidade do retry controlado em caso de uncertain
+  const RETRY_AVAIL_MS = process.env.NODE_ENV === 'test' ? 0 : 5 * 60 * 1000;
+  const getRetryDisponivelEm = () => new Date(Date.now() + RETRY_AVAIL_MS).toISOString();
 
   // 10. Transição → supplier_call_started (antes de chamar /extend)
   await atualizar(db, idempotency_key, {
     status:               'supplier_call_started',
     vencimento_anterior:  vencimentoAnteriorISO,
+    data_base:            dataBaseISO, // GRAVADO OBRIGATORIAMENTE ANTES DO 1º POST
     custom_date:          customDate,
     connections:          maxCons,
     lock_expires_at:      new Date(Date.now() + SUPPLIER_LOCK_MS).toISOString()
@@ -472,9 +576,10 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     logger.warn(`[extender][${idempotency_key}] Erro de rede no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
     // Erro de rede/timeout após envio — não sabemos se o fornecedor executou a mutação, classificado como uncertain
     await atualizar(db, idempotency_key, {
-      status:                  'uncertain',
-      erro_codigo:             'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado: `Erro de rede ao chamar /extend: ${networkErr.message}`
+      status:                         'uncertain',
+      erro_codigo:                    'SUPPLIER_EXTENSION_UNCERTAIN',
+      erro_detalhe_sanitizado:        `Erro de rede ao chamar /extend: ${networkErr.message}`,
+      retry_controlado_disponivel_em: getRetryDisponivelEm()
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
   }
@@ -503,11 +608,16 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
     logger.warn(`[extender][${idempotency_key}] Falha no POST /extend. status=${extendResponse.status}, isExplicitRejection=${isExplicitRejection}. Mapeando para status=${novoStatus}, erro=${erroCodigo}`);
 
-    await atualizar(db, idempotency_key, {
+    const camposUpdate = {
       status:                  novoStatus,
       erro_codigo:             erroCodigo,
       erro_detalhe_sanitizado: `Fornecedor retornou HTTP ${extendResponse.status} com data: ${typeof extendResponse.data === 'object' ? JSON.stringify(extendResponse.data) : String(extendResponse.data)}`
-    });
+    };
+    if (novoStatus === 'uncertain') {
+      camposUpdate.retry_controlado_disponivel_em = getRetryDisponivelEm();
+    }
+
+    await atualizar(db, idempotency_key, camposUpdate);
 
     throw Object.assign(
       new Error(erroCodigo),
@@ -558,9 +668,10 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     logger.warn(`[extender][${idempotency_key}] Confirmação stale após ${CONFIRM_DELAY_MS}ms. Detalhes: ${JSON.stringify(detalhesConfirmacao)}. Delegando para recovery.`);
     // supplierAccepted=true: nunca retorna 502/failed. Recovery via reconciliar() confirma sem novo POST.
     await atualizar(db, idempotency_key, {
-      status:                  'uncertain',
-      erro_codigo:             'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado: 'Extensão aceita pelo fornecedor, mas getClients ainda stale após 5s. Aguardando recovery.'
+      status:                         'uncertain',
+      erro_codigo:                    'SUPPLIER_EXTENSION_UNCERTAIN',
+      erro_detalhe_sanitizado:       'Extensão aceita pelo fornecedor, mas getClients ainda stale após 5s. Aguardando recovery.',
+      retry_controlado_disponivel_em: getRetryDisponivelEm()
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
   }

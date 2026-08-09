@@ -178,6 +178,35 @@ export async function lerOperacao(db, key) {
   return data;
 }
 
+/**
+ * Tenta realizar o claim atômico para autorização exclusiva do único retry mutativo.
+ * Retorna o registro atualizado se concedido com sucesso, ou null se falhou no claim.
+ *
+ * @param {object} db
+ * @param {string} key
+ * @returns {Promise<object|null>}
+ */
+export async function claimRetryControlado(db, key) {
+  const agora = new Date().toISOString();
+  const { data, error } = await db
+    .from(TABLE)
+    .update({
+      retry_controlado_executado_em: agora,
+      updated_at: agora
+    })
+    .eq('idempotency_key', key)
+    .eq('status', 'uncertain')
+    .is('retry_controlado_executado_em', null)
+    .select()
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+  return data;
+}
+
+
 // ─── Recovery no startup ──────────────────────────────────────────────────────
 
 /**

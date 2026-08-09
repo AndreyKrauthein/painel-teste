@@ -148,10 +148,14 @@ function createDb(initialRecords = [], opts = {}) {
   }
   const { insertError = null, updateError = null } = opts;
 
-  function matchAll(records, eqs, lts) {
+  function matchAll(records, eqs, lts, iss = []) {
     return records.filter(r => {
       for (const [f, v] of eqs) if (String(r[f]) !== String(v)) return false;
       for (const [f, v] of lts) if (!(new Date(r[f]) < new Date(v))) return false;
+      for (const [f, v] of iss) {
+        if (v === null && r[f] !== null && r[f] !== undefined) return false;
+        if (v !== null && String(r[f]) !== String(v)) return false;
+      }
       return true;
     });
   }
@@ -165,6 +169,7 @@ function createDb(initialRecords = [], opts = {}) {
         _updateData: null,
         _eqs: [],
         _lts: [],
+        _iss: [],
         _withSelect: false,
         _withSingle: false,
 
@@ -181,6 +186,7 @@ function createDb(initialRecords = [], opts = {}) {
 
         eq(f, v) { b._eqs.push([f, v]); return b; },
         lt(f, v) { b._lts.push([f, v]); return b; },
+        is(f, v) { b._iss.push([f, v]); return b; },
 
         single() { b._withSingle = true; return Promise.resolve(exec()); },
 
@@ -207,7 +213,7 @@ function createDb(initialRecords = [], opts = {}) {
       function exec() {
         if (b._op === 'select') {
           const all   = [...store.values()];
-          const found = matchAll(all, b._eqs, b._lts);
+          const found = matchAll(all, b._eqs, b._lts, b._iss);
           if (b._withSingle) {
             if (found.length === 0) return { data: null, error: { code: 'PGRST116' } };
             return { data: found[0], error: null };
@@ -217,7 +223,7 @@ function createDb(initialRecords = [], opts = {}) {
         if (b._op === 'update') {
           if (updateError) return { data: null, error: updateError };
           const all   = [...store.values()];
-          const found = matchAll(all, b._eqs, b._lts);
+          const found = matchAll(all, b._eqs, b._lts, b._iss);
           const updated = found.map(r => {
             const n = { ...r, ...b._updateData, updated_at: new Date().toISOString() };
             store.set(r.idempotency_key, n);
@@ -1389,11 +1395,251 @@ async function runRecoveryTests() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SEÇÃO F — Motor Genérico de Recovery +3 / +30 (TF-1 a TF-8)
+// ═══════════════════════════════════════════════════════════════════════════════
+async function runGenericRecoveryTests() {
+  console.log('\n── Seção F: Motor Genérico de Recovery (+3 e +30) ──');
+
+  // TF-1: data_base persistida no banco antes do 1º POST
+  await test('TF-1 — data_base persistida no DB antes do 1º POST', async () => {
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData:          { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-1', dias: 3 },
+      { cmsClient: cms, db }
+    );
+    assert.equal(result.success, true);
+    const rec = db._store.get('key-TF-1');
+    assert.ok(rec.data_base, 'data_base deve ser gravada no banco');
+    assert.equal(result.data.data_base, rec.data_base, 'data_base retornada deve bater com a persistida no DB');
+  });
+
+  // TF-2: Chamadas durante janela temporal realizam apenas GET (0 POSTs extras)
+  await test('TF-2 — Janela temporal no futuro: chamadas repetidas fazem apenas GET (0 POSTs extras)', async () => {
+    let extendCalls = 0;
+    const futuro = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min no futuro
+    const db = createDb([{
+      idempotency_key: 'key-TF-2', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: futuro,
+      retry_controlado_executado_em: null,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    // Fazer 3 chamadas durante a janela
+    await extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-2' }, { cmsClient: cms, db });
+    await extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-2' }, { cmsClient: cms, db });
+    await extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-2' }, { cmsClient: cms, db });
+
+    assert.equal(extendCalls, 0, 'Zero POSTs durante a janela temporal passiva');
+    const rec = db._store.get('key-TF-2');
+    assert.equal(rec.retry_controlado_executado_em, null, 'retry_controlado_executado_em deve continuar NULL');
+  });
+
+  // TF-3: Retry controlado pós-janela envia exatamente a custom_date original
+  await test('TF-3 — Retry controlado pós-janela: envia exatamente a custom_date original imutável', async () => {
+    let capturedBody = null;
+    let extendCalls = 0;
+    const passado = new Date(Date.now() - 1000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'key-TF-3', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: passado,
+      retry_controlado_executado_em: null,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) { extendCalls++; capturedBody = body; }
+      return origPost(url, body, opts);
+    };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-3' },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(extendCalls, 1, 'Exatamente 1 POST de retry disparado');
+    assert.ok(capturedBody.includes('customDate=2035-08-05'), 'POST de retry deve re-enviar customDate original');
+    const rec = db._store.get('key-TF-3');
+    assert.ok(rec.retry_controlado_executado_em, 'retry_controlado_executado_em deve ser preenchido');
+  });
+
+  // TF-4: Claim atômico de concorrência: apenas 1 worker dispara o POST
+  await test('TF-4 — Concorrência: apenas 1 worker obtém claim; o segundo faz GET-only', async () => {
+    let extendCalls = 0;
+    const passado = new Date(Date.now() - 1000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'key-TF-4', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: passado,
+      retry_controlado_executado_em: null,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    // Executa 2 chamadas simultâneas (Workers 1 e 2)
+    const [p1, p2] = await Promise.all([
+      extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-4' }, { cmsClient: cms, db }),
+      extenderAcesso({ identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-4' }, { cmsClient: cms, db })
+    ]);
+
+    assert.equal(extendCalls, 1, 'Exatamente 1 worker dispara o POST do retry (claim atômico)');
+    assert.equal(p1.success, true);
+    assert.equal(p2.success, true);
+  });
+
+  // TF-5: Chamadas posteriores ao retry são permanentemente GET-only
+  await test('TF-5 — Pós-retry executado: chamadas futuras são permanentemente GET-only', async () => {
+    let extendCalls = 0;
+    const passado = new Date(Date.now() - 1000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'key-TF-5', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1,
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: passado,
+      retry_controlado_executado_em: passado, // Já foi executado!
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-5' },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(res.success, false, 'GET ainda stale → retorna success=false');
+    assert.equal(extendCalls, 0, 'ZERO novos POSTs executados após retry_controlado_executado_em preenchido');
+  });
+
+  // TF-6: Motor genérico atende +30 (renovação mensal) com custom_date imutável
+  await test('TF-6 — Renovação Mensal (+30): motor genérico confirma +30 com custom_date imutável', async () => {
+    const db = createDb();
+    let capturedBody = null;
+    const cms = makeCmsClient({
+      clienteData:          { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '01/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-1:54160049', dias: 30 },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(result.success, true);
+    assert.ok(capturedBody.includes('customDate=2035-09-01'), 'customDate para +30 deve ser +30 dias (2035-09-01)');
+    const rec = db._store.get('mp_mensal_renovacao:pay-1:54160049');
+    assert.equal(rec.status, 'done');
+    assert.ok(rec.data_base, 'data_base deve estar salva');
+  });
+
+  // TF-7: Retry no +30 re-envia a custom_date original de 30 dias
+  await test('TF-7 — Retry no +30: re-envia custom_date original de 30 dias (sem recalcular)', async () => {
+    let capturedBody = null;
+    const passado = new Date(Date.now() - 1000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'mp_mensal_renovacao:pay-2:54160049', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-09-01', connections: 1, // +30 original
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: passado,
+      retry_controlado_executado_em: null,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '01/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-2:54160049', dias: 30 },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(result.success, true);
+    assert.ok(capturedBody.includes('customDate=2035-09-01'), 'POST de retry do +30 deve usar a customDate original 2035-09-01');
+  });
+
+  // TF-8: Invariante de anti-duplicação: Jamais ocorre +6 no +3 nem +60 no +30
+  await test('TF-8 — Anti-Duplicação: Vencimento final retornado é estritamente o customDate alvo original', async () => {
+    const passado = new Date(Date.now() - 1000).toISOString();
+    const db = createDb([{
+      idempotency_key: 'key-TF-8', status: 'uncertain',
+      identificador_fornecedor: '3584843', usuario_acesso: '54160049',
+      custom_date: '2035-08-05', connections: 1, // +3
+      vencimento_anterior: '2035-08-02T02:55:00.000Z',
+      data_base: '2035-08-02T02:55:00.000Z',
+      retry_controlado_disponivel_em: passado,
+      retry_controlado_executado_em: null,
+      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
+      tipo: 'extensao_cortesia_3d'
+    }]);
+    const cms = makeCmsClient({
+      clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '05/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+
+    const result = await extenderAcesso(
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'key-TF-8', dias: 3 },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(result.success, true);
+    // Vencimento retornado DEVE ser exatamente 05/08/2035 (~06T02:55Z), NUNCA +6 (08/08)
+    assert.ok(result.data.vencimento_atual.startsWith('2035-08-06'), `Vencimento retornado: ${result.data.vencimento_atual}`);
+    assert.equal(result.data.data_solicitada, '2035-08-05');
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // EXECUÇÃO
 // ═══════════════════════════════════════════════════════════════════════════════
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║  Suite: extender + idempotency + parser (52 testes) ║');
+  console.log('║  Suite: extender + idempotency + parser (65 testes) ║');
   console.log('╚══════════════════════════════════════════════════════╝');
 
   await runParserTests();
@@ -1401,6 +1647,7 @@ async function main() {
   await runIdempotencyTests();
   await runExtenderTests();
   await runRecoveryTests();
+  await runGenericRecoveryTests();
 
   console.log('\n══════════════════════════════════════════════════════');
   console.log(`  Total: ${passed + failed} | ✅ ${passed} passed | ❌ ${failed} failed`);
@@ -1419,3 +1666,4 @@ main().catch(err => {
   console.error('Erro fatal na suite de testes:', err);
   process.exit(1);
 });
+
