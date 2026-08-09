@@ -273,7 +273,11 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     usuario_acesso,
     idempotency_key,
     usuario_id = null,
-    acesso_provisionado_id = null
+    acesso_provisionado_id = null,
+    dias = 3,
+    duracao_dias = null,
+    customDate: customDateParam = null,
+    custom_date: customDateParamAlt = null
   } = params;
 
   // 1. Validação básica
@@ -415,8 +419,13 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     throw Object.assign(new Error('SUPPLIER_CONNECTIONS_UNAVAILABLE'), { status: 422 });
   }
 
-  // 9. Calcular data de extensão (+3 dias corridos em BRT)
-  const { base, customDate } = calcularDataExtensao(expireRaw);
+  // 9. Calcular data de extensão parametrizada
+  const diasEfetivos = Number.isInteger(Number(dias || duracao_dias)) && Number(dias || duracao_dias) > 0 ? Number(dias || duracao_dias) : 3;
+  let customDate = customDateParam || customDateParamAlt;
+  if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
+    const calc = calcularDataExtensao(expireRaw, diasEfetivos);
+    customDate = calc.customDate;
+  }
   const vencimentoAnteriorISO = expireDate.toISOString();
 
   // 10. Transição → supplier_call_started (antes de chamar /extend)

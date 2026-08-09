@@ -262,8 +262,9 @@ export function isSupplierStatusOperational(status) {
  * @param {string|null} vencimentoAtualStr Data no formato brasileiro ou null
  * @returns {{ base: Date, novaData: Date, customDate: string }}
  */
-export function calcularDataExtensao(vencimentoAtualStr) {
+export function calcularDataExtensao(vencimentoAtualStr, dias = 3) {
   const agora = new Date();
+  const diasParam = Number.isInteger(Number(dias)) && Number(dias) > 0 ? Number(dias) : 3;
 
   let base = agora;
   if (vencimentoAtualStr) {
@@ -282,9 +283,9 @@ export function calcularDataExtensao(vencimentoAtualStr) {
   // 2. Parsear como data civil
   const [y, m, d] = brtDateStr.split('-').map(Number);
 
-  // 3. +3 dias como aritmética civil usando Date.UTC como contenedor numérico.
+  // 3. +N dias como aritmética civil usando Date.UTC como contenedor numérico.
   //    JS normaliza overflow: Date.UTC(2026, 7, 32) → 2026-09-01T00:00:00Z
-  const civil = new Date(Date.UTC(y, m - 1, d + 3));
+  const civil = new Date(Date.UTC(y, m - 1, d + diasParam));
 
   // 4. Ler de volta com getUTC* para evitar conversão de timezone.
   //    Se usarmos Intl.format(civil) em BRT, UTC midnight → dia anterior em BRT.

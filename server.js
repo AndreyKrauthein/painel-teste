@@ -510,7 +510,11 @@ fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, rep
     usuario_acesso,
     idempotency_key,
     usuario_id,
-    acesso_provisionado_id
+    acesso_provisionado_id,
+    dias,
+    duracao_dias,
+    customDate,
+    custom_date
   } = request.body ?? {};
 
   // Validação básica de presença antes de chamar o extender
@@ -524,7 +528,7 @@ fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, rep
 
   try {
     const result = await extenderAcesso(
-      { identificador_fornecedor, usuario_acesso, idempotency_key, usuario_id, acesso_provisionado_id },
+      { identificador_fornecedor, usuario_acesso, idempotency_key, usuario_id, acesso_provisionado_id, dias, duracao_dias, customDate, custom_date },
       { cmsClient, db: supabaseAdmin }
     );
 
