@@ -565,8 +565,8 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     // Instrumentação de Homologação DEV/E2E: Permite suprimir o PRIMEIRO POST especificamente para a chave configurada
     const isE2ESuppressFirstPost =
       process.env.NODE_ENV !== 'production' &&
-      process.env.E2E_SUPPRESS_FIRST_POST_KEY &&
-      idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+      (Boolean(params?.e2e_suppress_first_post) ||
+       (process.env.E2E_SUPPRESS_FIRST_POST_KEY && idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY));
 
     if (isE2ESuppressFirstPost) {
       logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO: Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
