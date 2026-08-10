@@ -7,7 +7,7 @@
 process.env.NODE_ENV = 'test';
 
 import assert from 'node:assert/strict';
-import { parseBrazilianDateToLocal, calcularDataExtensao, isSupplierStatusOperational } from '../src/parser.js';
+import { parseBrazilianDateToLocal, calcularDataExtensao, calcularDataAlvoMensalidade, isSupplierStatusOperational } from '../src/parser.js';
 import {
   computeRequestHash,
   reservar,
@@ -1549,58 +1549,60 @@ async function runGenericRecoveryTests() {
     assert.equal(extendCalls, 0, 'ZERO novos POSTs executados após retry_controlado_executado_em preenchido');
   });
 
-  // TF-6: Motor genérico atende +30 (renovação mensal) com custom_date imutável
-  await test('TF-6 — Renovação Mensal (+30): motor genérico confirma +30 com custom_date imutável', async () => {
+  // TF-6: Motor genérico atende Mensalidade Nativa (option=92, customDate vazia) com data-alvo imutável
+  await test('TF-6 — Renovação Mensal Nativa: envia option=92, customDate vazia e confirma alvo', async () => {
     const db = createDb();
     let capturedBody = null;
     const cms = makeCmsClient({
       clienteData:          { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '01/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '02/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
 
     const result = await extenderAcesso(
-      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-1:54160049', dias: 30 },
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-1:54160049', tipo: 'mensalidade' },
       { cmsClient: cms, db }
     );
 
     assert.equal(result.success, true);
-    assert.ok(capturedBody.includes('customDate=2035-09-01'), 'customDate para +30 deve ser +30 dias (2035-09-01)');
+    assert.ok(capturedBody.includes('option=92'), 'POST de mensalidade deve enviar option=92');
+    assert.ok(capturedBody.includes('customDate='), 'POST de mensalidade deve enviar customDate vazia');
     const rec = db._store.get('mp_mensal_renovacao:pay-1:54160049');
     assert.equal(rec.status, 'done');
     assert.ok(rec.data_base, 'data_base deve estar salva');
   });
 
-  // TF-7: Retry no +30 re-envia a custom_date original de 30 dias
-  await test('TF-7 — Retry no +30: re-envia custom_date original de 30 dias (sem recalcular)', async () => {
+  // TF-7: Retry no mensal re-envia option=92 e customDate vazia (mantendo data-alvo imutável)
+  await test('TF-7 — Retry na Mensalidade: re-envia option=92 e customDate vazia', async () => {
     let capturedBody = null;
     const passado = new Date(Date.now() - 1000).toISOString();
     const db = createDb([{
       idempotency_key: 'mp_mensal_renovacao:pay-2:54160049', status: 'uncertain',
       identificador_fornecedor: '3584843', usuario_acesso: '54160049',
-      custom_date: '2035-09-01', connections: 1, // +30 original
+      custom_date: '2035-09-02', connections: 1, // alvo +1 mês
       vencimento_anterior: '2035-08-02T02:55:00.000Z',
       data_base: '2035-08-02T02:55:00.000Z',
       retry_controlado_disponivel_em: passado,
       retry_controlado_executado_em: null,
-      request_hash: computeRequestHash('extensao_cortesia_3d', '3584843', '54160049'),
-      tipo: 'extensao_cortesia_3d'
+      request_hash: computeRequestHash('extensao_mensalidade', '3584843', '54160049'),
+      tipo: 'extensao_mensalidade'
     }]);
     const cms = makeCmsClient({
       clienteData: { user_id: 3584843, raw_username: '54160049', expire: '02/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '01/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
+      getClientsAfterExtend: [{ user_id: 3584843, raw_username: '54160049', expire: '02/09/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
 
     const result = await extenderAcesso(
-      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-2:54160049', dias: 30 },
+      { identificador_fornecedor: '3584843', usuario_acesso: '54160049', idempotency_key: 'mp_mensal_renovacao:pay-2:54160049', tipo: 'mensalidade' },
       { cmsClient: cms, db }
     );
 
     assert.equal(result.success, true);
-    assert.ok(capturedBody.includes('customDate=2035-09-01'), 'POST de retry do +30 deve usar a customDate original 2035-09-01');
+    assert.ok(capturedBody.includes('option=92'), 'Retry mensal deve enviar option=92');
+    assert.ok(capturedBody.includes('customDate='), 'Retry mensal deve enviar customDate vazia');
   });
 
   // TF-8: Invariante de anti-duplicação: Jamais ocorre +6 no +3 nem +60 no +30
@@ -1719,11 +1721,79 @@ async function runFailpointTests() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SEÇÃO H — Testes Específicos da Renovação Mensal Nativa Rboys (TH-1 a TH-5)
+// ═══════════════════════════════════════════════════════════════════════════════
+async function runNativeMensalidadeTests() {
+  console.log('\n── Seção H: Renovação Mensal Nativa Rboys (option=92) ──');
+
+  // TH-1: Mensalidade ativa: 10/08 -> alvo esperado 10/09, payload option=92, customDate vazia
+  await test('TH-1 — Mensalidade ativa (10/08 -> 10/09): envia option=92 e customDate vazia', async () => {
+    const calc = calcularDataAlvoMensalidade('10/08/2026 23:55:00');
+    assert.equal(calc.customDate, '2026-09-10');
+
+    let capturedBody = null;
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData:          { user_id: 1111, raw_username: 'u1111', expire: '10/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 1111, raw_username: 'u1111', expire: '10/09/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
+
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '1111', usuario_acesso: 'u1111', idempotency_key: 'mp_mensal_renovacao:h1:u1111', tipo: 'mensalidade' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(res.success, true);
+    assert.ok(capturedBody.includes('option=92'), 'Deve conter option=92');
+    assert.ok(capturedBody.includes('customDate='), 'customDate deve ser vazia');
+  });
+
+  // TH-2: Mensalidade: 10/09 -> alvo 10/10
+  await test('TH-2 — Mensalidade (10/09 -> 10/10): calcula alvo correto para o mês seguinte', async () => {
+    const calc = calcularDataAlvoMensalidade('10/09/2026 23:55:00');
+    assert.equal(calc.customDate, '2026-10-10');
+  });
+
+  // TH-3: Overflow de calendário: 31/08 -> 01/10
+  await test('TH-3 — Overflow de calendário (31/08 -> 01/10): 31 de agosto vira 01 de outubro', async () => {
+    const calc = calcularDataAlvoMensalidade('31/08/2026 23:55:00');
+    assert.equal(calc.customDate, '2026-10-01');
+  });
+
+  // TH-4: Acesso expirado: expirou 05/08, operação 10/08 -> alvo 10/09
+  await test('TH-4 — Acesso expirado: base=hoje, alvo=1 mês civil', async () => {
+    const calc = calcularDataAlvoMensalidade('05/08/2026 23:55:00');
+    assert.ok(calc.customDate, 'Data alvo gerada com sucesso');
+  });
+
+  // TH-5: Cortesia +3: continua option=custom e customDate +3
+  await test('TH-5 — Cortesia +3: envia option=custom e customDate com +3 dias', async () => {
+    let capturedBody = null;
+    const db = createDb();
+    const cms = makeCmsClient({
+      clienteData:          { user_id: 2222, raw_username: 'u2222', expire: '10/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 2222, raw_username: 'u2222', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
+
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '2222', usuario_acesso: 'u2222', idempotency_key: 'cortesia_3d:h5', dias: 3 },
+      { cmsClient: cms, db }
+    );
+    assert.equal(res.success, true);
+    assert.ok(capturedBody.includes('option=custom'), 'Cortesia deve usar option=custom');
+    assert.ok(capturedBody.includes('customDate=2026-08-13'), 'Cortesia deve enviar customDate calculada');
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // EXECUÇÃO
 // ═══════════════════════════════════════════════════════════════════════════════
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║  Suite: extender + idempotency + parser (68 testes) ║');
+  console.log('║  Suite: extender + idempotency + parser              ║');
   console.log('╚══════════════════════════════════════════════════════╝');
 
   await runParserTests();
@@ -1733,6 +1803,7 @@ async function main() {
   await runRecoveryTests();
   await runGenericRecoveryTests();
   await runFailpointTests();
+  await runNativeMensalidadeTests();
 
   console.log('\n══════════════════════════════════════════════════════');
   console.log(`  Total: ${passed + failed} | ✅ ${passed} passed | ❌ ${failed} failed`);

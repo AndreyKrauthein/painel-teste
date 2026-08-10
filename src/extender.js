@@ -1,6 +1,6 @@
 import logger from './safeLogger.js';
 import { extractToken } from './parser.js';
-import { parseBrazilianDateToLocal, calcularDataExtensao, isSupplierStatusOperational } from './parser.js';
+import { parseBrazilianDateToLocal, calcularDataExtensao, calcularDataAlvoMensalidade, isSupplierStatusOperational } from './parser.js';
 import {
   computeRequestHash,
   reservar,
@@ -265,12 +265,18 @@ async function reconciliar(db, operacao, cmsClient) {
     // Tentar o CLAIM ATÔMICO no banco de dados para autorização exclusiva
     const claimed = await claimRetryControlado(db, idempotency_key);
     if (claimed) {
-      logger.info(`[extender][${idempotency_key}] Claim de retry controlado CONCEDIDO. Disparando o ÚNICO retry mutativo reenviando customDate=${customDateStr}...`);
+      const isMensalidadeOp = operacao.tipo === 'extensao_mensalidade' || operacao.tipo_extensao === 'mensalidade' || (idempotency_key && idempotency_key.startsWith('mp_mensal_renovacao:'));
+      logger.info(`[extender][${idempotency_key}] Claim de retry controlado CONCEDIDO. Disparando o ÚNICO retry mutativo (isMensalidade: ${isMensalidadeOp}, customDateTarget=${customDateStr})...`);
       try {
         const body = new URLSearchParams();
         body.append('_token', csrfToken);
-        body.append('option', 'custom');
-        body.append('customDate', customDateStr);
+        if (isMensalidadeOp) {
+          body.append('option', '92');
+          body.append('customDate', '');
+        } else {
+          body.append('option', 'custom');
+          body.append('customDate', customDateStr);
+        }
         body.append('connections', String(connections));
 
         const extendResponse = await cmsClient.post(
@@ -378,6 +384,8 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     idempotency_key,
     usuario_id = null,
     acesso_provisionado_id = null,
+    tipo: tipoParam = null,
+    tipo_extensao: tipoExtensaoParam = null,
     dias = 3,
     duracao_dias = null,
     customDate: customDateParam = null,
@@ -391,14 +399,17 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     });
   }
 
+  const isMensalidade = tipoParam === 'mensalidade' || tipoExtensaoParam === 'mensalidade' || (idempotency_key && idempotency_key.startsWith('mp_mensal_renovacao:'));
+  const tipoOp = isMensalidade ? 'extensao_mensalidade' : TIPO;
+
   // 2. Hash obrigatório do payload imutável
-  const requestHash = computeRequestHash(TIPO, identificador_fornecedor, usuario_acesso);
+  const requestHash = computeRequestHash(tipoOp, identificador_fornecedor, usuario_acesso);
 
   // 3. Reserva atômica
   let reserva;
   try {
     reserva = await reservar(db, idempotency_key, {
-      tipo:                     TIPO,
+      tipo:                     tipoOp,
       identificador_fornecedor: String(identificador_fornecedor),
       usuario_acesso:           String(usuario_acesso),
       usuario_id,
@@ -523,15 +534,26 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     throw Object.assign(new Error('SUPPLIER_CONNECTIONS_UNAVAILABLE'), { status: 422 });
   }
 
-  // 9. Calcular data de extensão parametrizada
-  const diasEfetivos = Number.isInteger(Number(dias || duracao_dias)) && Number(dias || duracao_dias) > 0 ? Number(dias || duracao_dias) : 3;
+  // 9. Calcular data de extensão parametrizada ou data-alvo de mensalidade
   let customDate = customDateParam || customDateParamAlt;
-  const calc = calcularDataExtensao(expireRaw, diasEfetivos);
-  if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
-    customDate = calc.customDate;
+  let dataBaseISO;
+
+  if (isMensalidade) {
+    const calc = calcularDataAlvoMensalidade(expireRaw);
+    if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
+      customDate = calc.customDate;
+    }
+    dataBaseISO = calc.base.toISOString();
+  } else {
+    const diasEfetivos = Number.isInteger(Number(dias || duracao_dias)) && Number(dias || duracao_dias) > 0 ? Number(dias || duracao_dias) : 3;
+    const calc = calcularDataExtensao(expireRaw, diasEfetivos);
+    if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
+      customDate = calc.customDate;
+    }
+    dataBaseISO = calc.base.toISOString();
   }
+
   const vencimentoAnteriorISO = expireDate.toISOString();
-  const dataBaseISO = calc.base.toISOString();
 
   // Helper para cálculo da disponibilidade do retry controlado em caso de uncertain
   const RETRY_AVAIL_MS = process.env.NODE_ENV === 'test' ? 0 : 5 * 60 * 1000;
@@ -542,7 +564,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     status:               'supplier_call_started',
     vencimento_anterior:  vencimentoAnteriorISO,
     data_base:            dataBaseISO, // GRAVADO OBRIGATORIAMENTE ANTES DO 1º POST
-    custom_date:          customDate,
+    custom_date:          customDate, // Para mensalidade, custom_date representa a data-alvo esperada para auditoria/recovery
     connections:          maxCons,
     lock_expires_at:      new Date(Date.now() + SUPPLIER_LOCK_MS).toISOString()
   });
@@ -554,12 +576,19 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
   try {
     const body = new URLSearchParams();
-    body.append('_token',     csrfToken);
-    body.append('option',     'custom');
-    body.append('customDate', customDate);
+    body.append('_token', csrfToken);
+
+    if (isMensalidade) {
+      body.append('option', '92');
+      body.append('customDate', '');
+    } else {
+      body.append('option', 'custom');
+      body.append('customDate', customDate);
+    }
+
     body.append('connections', String(maxCons));
 
-    logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend. custom_date: ${customDate}, max_cons: ${maxCons}`);
+    logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend (isMensalidade: ${isMensalidade}, option: ${isMensalidade ? '92' : 'custom'}). target: ${customDate}, max_cons: ${maxCons}`);
     mutationDispatched = true;
 
     // Instrumentação de Homologação DEV/E2E: Permite suprimir o PRIMEIRO POST especificamente para a chave configurada

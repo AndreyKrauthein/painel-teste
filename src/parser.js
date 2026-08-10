@@ -299,3 +299,54 @@ export function calcularDataExtensao(vencimentoAtualStr, dias = 3) {
 
   return { base, novaData, customDate };
 }
+
+/**
+ * Calcula a data-alvo de extensão de mensalidade nativa Rboys (+1 mês civil em America/Sao_Paulo).
+ *
+ * Regras:
+ * - base = max(agora, vencimentoAtual)
+ * - Adiciona 1 mês civil com overflow de calendário nativo do Rboys.
+ *
+ * Exemplos:
+ *   10/08/2026 -> 10/09/2026
+ *   10/09/2026 -> 10/10/2026
+ *   31/08/2026 -> 01/10/2026 (overflow de setembro com 30 dias -> 01 de outubro)
+ *   Expirado 05/08, renovado 10/08 -> base = 10/08 -> 10/09/2026
+ *
+ * @param {string|null} vencimentoAtualStr Data no formato brasileiro ou null
+ * @returns {{ base: Date, novaData: Date, customDate: string }}
+ */
+export function calcularDataAlvoMensalidade(vencimentoAtualStr) {
+  const agora = new Date();
+
+  let base = agora;
+  if (vencimentoAtualStr) {
+    const vencimento = parseBrazilianDateToLocal(vencimentoAtualStr);
+    if (vencimento && vencimento > agora) {
+      base = vencimento;
+    }
+  }
+
+  // 1. Obter a data civil de 'base' em America/Sao_Paulo como "YYYY-MM-DD"
+  const brtDateStr = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Sao_Paulo'
+  }).format(base);
+
+  // 2. Parsear como data civil
+  const [y, m, d] = brtDateStr.split('-').map(Number);
+
+  // 3. +1 mês como aritmética civil usando Date.UTC.
+  // JS normaliza overflow de mês automaticamente:
+  // Date.UTC(2026, 7+1, 31) -> mês 8 (setembro), dia 31 vira 01 de outubro (2026-10-01)
+  const civil = new Date(Date.UTC(y, m, d));
+
+  const yy = civil.getUTCFullYear();
+  const mm = String(civil.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(civil.getUTCDate()).padStart(2, '0');
+  const customDate = `${yy}-${mm}-${dd}`;
+
+  const novaData = new Date(`${customDate}T23:55:00-03:00`);
+
+  return { base, novaData, customDate };
+}
+
