@@ -540,9 +540,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
   if (isMensalidade) {
     const calc = calcularDataAlvoMensalidade(expireRaw);
-    if (!customDate || !/^\d{4}-\d{2}-\d{2}$/.test(customDate)) {
-      customDate = calc.customDate;
-    }
+    customDate = calc.customDate; // Para mensalidade, o alvo de auditoria no DB é SEMPRE o +1 mês civil nativo
     dataBaseISO = calc.base.toISOString();
   } else {
     const diasEfetivos = Number.isInteger(Number(dias || duracao_dias)) && Number(dias || duracao_dias) > 0 ? Number(dias || duracao_dias) : 3;
