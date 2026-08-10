@@ -514,7 +514,8 @@ fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, rep
     dias,
     duracao_dias,
     customDate,
-    custom_date
+    custom_date,
+    e2e_suppress_first_post
   } = request.body ?? {};
 
   // Validação básica de presença antes de chamar o extender
@@ -528,7 +529,7 @@ fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, rep
 
   try {
     const result = await extenderAcesso(
-      { identificador_fornecedor, usuario_acesso, idempotency_key, usuario_id, acesso_provisionado_id, dias, duracao_dias, customDate, custom_date },
+      { identificador_fornecedor, usuario_acesso, idempotency_key, usuario_id, acesso_provisionado_id, dias, duracao_dias, customDate, custom_date, e2e_suppress_first_post },
       { cmsClient, db: supabaseAdmin }
     );
 
