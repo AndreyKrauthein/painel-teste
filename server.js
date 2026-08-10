@@ -169,7 +169,8 @@ fastify.get('/health', async (request, reply) => {
   return {
     success: true,
     service: 'painel-testes',
-    status: 'online'
+    status: 'online',
+    version: '1.2.0-native-m92'
   };
 });
 
