@@ -562,6 +562,17 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend. custom_date: ${customDate}, max_cons: ${maxCons}`);
     mutationDispatched = true;
 
+    // Instrumentação de Homologação DEV/E2E: Permite suprimir o PRIMEIRO POST especificamente para a chave configurada
+    const isE2ESuppressFirstPost =
+      process.env.NODE_ENV !== 'production' &&
+      process.env.E2E_SUPPRESS_FIRST_POST_KEY &&
+      idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+
+    if (isE2ESuppressFirstPost) {
+      logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO: Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
+      throw new Error('E2E_SIMULATED_FIRST_POST_TIMEOUT');
+    }
+
     extendResponse = await cmsClient.post(
       `/clients/${identificador_fornecedor}/extend`,
       body.toString(),
@@ -573,12 +584,11 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       }
     );
   } catch (networkErr) {
-    logger.warn(`[extender][${idempotency_key}] Erro de rede no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
-    // Erro de rede/timeout após envio — não sabemos se o fornecedor executou a mutação, classificado como uncertain
+    logger.warn(`[extender][${idempotency_key}] Erro no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
     await atualizar(db, idempotency_key, {
       status:                         'uncertain',
       erro_codigo:                    'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado:        `Erro de rede ao chamar /extend: ${networkErr.message}`,
+      erro_detalhe_sanitizado:        `Erro no POST /extend: ${networkErr.message}`,
       retry_controlado_disponivel_em: getRetryDisponivelEm()
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });

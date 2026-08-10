@@ -1635,11 +1635,95 @@ async function runGenericRecoveryTests() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SEÇÃO G — FAILPOINT E2E & SIMULAÇÃO PRIMEIRO POST SUPRIMIDO (TESTE 2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function runFailpointTests() {
+  console.log('\n--- Seção G: Failpoint E2E (Primeira Mutação Suprimida & Retry Controlado) ---');
+
+  await test('TG-1: Sem failpoint, primeira mutação chama fornecedor normalmente', async () => {
+    delete process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+    const db = createDb();
+    let extendCalls = 0;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9991, raw_username: 'user9991', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 9991, raw_username: 'user9991', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '9991', usuario_acesso: 'user9991', idempotency_key: 'key-TG-1', dias: 3 },
+      { cmsClient: cms, db }
+    );
+    assert.equal(res.success, true);
+    assert.equal(extendCalls, 1);
+  });
+
+  await test('TG-2: Failpoint ativo na operação alvo suprime primeiro POST e lança SUPPLIER_EXTENSION_UNCERTAIN (202)', async () => {
+    const key = 'key-TG-2';
+    process.env.E2E_SUPPRESS_FIRST_POST_KEY = key;
+    const db = createDb();
+    let extendCalls = 0;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9992, raw_username: 'user9992', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    let thrown = null;
+    try {
+      await extenderAcesso(
+        { identificador_fornecedor: '9992', usuario_acesso: 'user9992', idempotency_key: key, dias: 3 },
+        { cmsClient: cms, db }
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, 'Deveria ter lançado erro');
+    assert.equal(thrown.message, 'SUPPLIER_EXTENSION_UNCERTAIN');
+    assert.equal(thrown.status, 202);
+    assert.equal(extendCalls, 0, 'Primeiro POST foi suprimido pelo failpoint');
+
+    const op = await lerOperacao(db, key);
+    assert.equal(op.status, 'uncertain');
+    assert.ok(op.custom_date, 'custom_date deve ser salva');
+    assert.ok(!op.retry_controlado_executado_em, 'retry_controlado_executado_em deve ser falsy/null');
+
+    delete process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+  });
+
+  await test('TG-3: Proteção contra produção: Failpoint é desativado em NODE_ENV=production', async () => {
+    const key = 'key-TG-3';
+    process.env.E2E_SUPPRESS_FIRST_POST_KEY = key;
+    process.env.NODE_ENV = 'production';
+    const db = createDb();
+    let extendCalls = 0;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9993, raw_username: 'user9993', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 9993, raw_username: 'user9993', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
+
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '9993', usuario_acesso: 'user9993', idempotency_key: key, dias: 3 },
+      { cmsClient: cms, db }
+    );
+
+    assert.equal(extendCalls, 1, 'Em produção o POST DEVE ser disparado');
+    process.env.NODE_ENV = 'test';
+    delete process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // EXECUÇÃO
 // ═══════════════════════════════════════════════════════════════════════════════
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║  Suite: extender + idempotency + parser (65 testes) ║');
+  console.log('║  Suite: extender + idempotency + parser (68 testes) ║');
   console.log('╚══════════════════════════════════════════════════════╝');
 
   await runParserTests();
@@ -1648,6 +1732,7 @@ async function main() {
   await runExtenderTests();
   await runRecoveryTests();
   await runGenericRecoveryTests();
+  await runFailpointTests();
 
   console.log('\n══════════════════════════════════════════════════════');
   console.log(`  Total: ${passed + failed} | ✅ ${passed} passed | ❌ ${failed} failed`);
