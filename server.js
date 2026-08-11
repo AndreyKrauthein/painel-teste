@@ -190,6 +190,18 @@ fastify.post('/admin/refresh-session', { preHandler: checkAuth }, refreshSession
  * GET /sessao/status
  * Authenticated. Checks if the currently saved session is alive.
  */
+fastify.get('/debug/env', { preHandler: checkAuth }, async (request, reply) => {
+  return {
+    success: true,
+    env: {
+      NODE_ENV: process.env.NODE_ENV || 'not_set',
+      E2E_FAILPOINTS_ENABLED: process.env.E2E_FAILPOINTS_ENABLED || 'not_set',
+      E2E_SUPPRESS_FIRST_POST_KEY: process.env.E2E_SUPPRESS_FIRST_POST_KEY ? 'CONFIGURED' : 'NOT_SET',
+      isFailpointsEnabled: (process.env.NODE_ENV !== 'production' && process.env.E2E_FAILPOINTS_ENABLED === 'true')
+    }
+  };
+});
+
 fastify.get('/sessao/status', { preHandler: checkAuth }, async (request, reply) => {
   try {
     const session = await loadSession();
