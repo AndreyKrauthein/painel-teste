@@ -587,20 +587,18 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     body.append('connections', String(maxCons));
 
     logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend (isMensalidade: ${isMensalidade}, option: ${isMensalidade ? '92' : 'custom'}). target: ${customDate}, max_cons: ${maxCons}`);
-    mutationDispatched = true;
 
-    // Instrumentação de Homologação DEV/E2E: Permite suprimir o PRIMEIRO POST especificamente para a chave configurada
-    const isE2ESuppressFirstPost =
-      Boolean(params?.e2e_suppress_first_post) ||
-      (process.env.NODE_ENV !== 'production' &&
-       process.env.E2E_SUPPRESS_FIRST_POST_KEY &&
-       idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY);
+    // Instrumentação de Homologação DEV/E2E: Trava FAIL-CLOSED estrita (Exige E2E_FAILPOINTS_ENABLED=true no servidor e escopo por chave)
+    const isFailpointsEnabled = process.env.NODE_ENV !== 'production' && process.env.E2E_FAILPOINTS_ENABLED === 'true';
+    const isTargetKey = process.env.E2E_SUPPRESS_FIRST_POST_KEY && idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+    const isE2ESuppressFirstPost = isFailpointsEnabled && (isTargetKey || Boolean(params?.e2e_suppress_first_post));
 
     if (isE2ESuppressFirstPost) {
-      logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO: Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
+      logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO (SERVER-ONLY): Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
       throw new Error('E2E_SIMULATED_FIRST_POST_TIMEOUT');
     }
 
+    mutationDispatched = true;
     extendResponse = await cmsClient.post(
       `/clients/${identificador_fornecedor}/extend`,
       body.toString(),
