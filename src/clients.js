@@ -104,6 +104,7 @@ export async function resolverClienteFornecedor(username, cmsClient, maxAttempts
   logger.info(`Cliente '${username}' resolvido com sucesso: user_id = ${clientResolved.user_id}`);
   return {
     user_id: Number(clientResolved.user_id),
-    expires: clientResolved.expire || null // Campo expire no singular
+    expires: clientResolved.expire || null, // Campo expire no singular
+    connections: Number(clientResolved.max_cons ?? 1)
   };
 }

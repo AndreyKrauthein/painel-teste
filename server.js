@@ -579,6 +579,66 @@ fastify.post('/acessos/estender', { preHandler: checkAuth }, async (request, rep
   }
 });
 
+// ─── GET /acessos/consultar ───────────────────────────────────────────────────
+// Consulta determinística autoritativa do estado atual de um cliente no fornecedor Rboys.
+fastify.get('/acessos/consultar', { preHandler: checkAuth }, async (request, reply) => {
+  const { identificador, username } = request.query ?? {};
+
+  if (!username) {
+    return reply.status(400).send({
+      success: false,
+      error: 'INVALID_REQUEST',
+      message: 'O parâmetro "username" é obrigatório.'
+    });
+  }
+
+  try {
+    const resolved = await resolverClienteFornecedor(username, cmsClient, 2, 500);
+    
+    if (identificador && String(resolved.user_id) !== String(identificador)) {
+      return reply.status(400).send({
+        success: false,
+        error: 'CANONICAL_PROVIDER_MISMATCH',
+        message: `Identificador retornado (${resolved.user_id}) diverge do esperado (${identificador}).`
+      });
+    }
+
+    return reply.status(200).send({
+      success: true,
+      data: {
+        identificador_fornecedor: String(resolved.user_id),
+        usuario_acesso: String(username),
+        connections: Number(resolved.connections ?? 1),
+        expira_em: resolved.expires || null,
+        status_fornecedor: 'ativo'
+      }
+    });
+
+  } catch (err) {
+    if (err.message === 'SUPPLIER_CLIENT_NOT_FOUND') {
+      return reply.status(404).send({
+        success: false,
+        error: 'SUPPLIER_CLIENT_NOT_FOUND',
+        message: 'Cliente não encontrado no fornecedor.'
+      });
+    }
+    if (err.message === 'SUPPLIER_CLIENT_AMBIGUOUS') {
+      return reply.status(409).send({
+        success: false,
+        error: 'SUPPLIER_CLIENT_AMBIGUOUS',
+        message: 'Múltiplos registros encontrados para o usuário.'
+      });
+    }
+
+    logger.warn(`[/acessos/consultar] Erro ao consultar cliente '${username}':`, err.message);
+    return reply.status(500).send({
+      success: false,
+      error: 'SUPPLIER_LOOKUP_FAILED',
+      message: err.message || 'Erro ao consultar cliente no fornecedor.'
+    });
+  }
+});
+
 // Start server
 const start = async () => {
   try {
