@@ -1648,8 +1648,8 @@ async function runFailpointTests() {
     const db = createDb();
     let extendCalls = 0;
     const cms = makeCmsClient({
-      clienteData: { user_id: 9991, raw_username: 'user9991', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 9991, raw_username: 'user9991', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData: { user_id: 9991, raw_username: 'user9991', expire: '10/08/2035 16:00:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 9991, raw_username: 'user9991', expire: '13/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
@@ -1664,11 +1664,13 @@ async function runFailpointTests() {
 
   await test('TG-2: Failpoint ativo na operação alvo suprime primeiro POST e lança SUPPLIER_EXTENSION_UNCERTAIN (202)', async () => {
     const key = 'key-TG-2';
+    process.env.E2E_FAILPOINTS_ENABLED = 'true';
     process.env.E2E_SUPPRESS_FIRST_POST_KEY = key;
     const db = createDb();
     let extendCalls = 0;
     const cms = makeCmsClient({
-      clienteData: { user_id: 9992, raw_username: 'user9992', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' }
+      clienteData: { user_id: 9992, raw_username: 'user9992', expire: '10/08/2035 16:00:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 9992, raw_username: 'user9992', expire: '13/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
@@ -1694,17 +1696,19 @@ async function runFailpointTests() {
     assert.ok(!op.retry_controlado_executado_em, 'retry_controlado_executado_em deve ser falsy/null');
 
     delete process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+    delete process.env.E2E_FAILPOINTS_ENABLED;
   });
 
   await test('TG-3: Proteção contra produção: Failpoint é desativado em NODE_ENV=production', async () => {
     const key = 'key-TG-3';
+    process.env.E2E_FAILPOINTS_ENABLED = 'true';
     process.env.E2E_SUPPRESS_FIRST_POST_KEY = key;
     process.env.NODE_ENV = 'production';
     const db = createDb();
     let extendCalls = 0;
     const cms = makeCmsClient({
-      clienteData: { user_id: 9993, raw_username: 'user9993', expire: '10/08/2026 16:00:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 9993, raw_username: 'user9993', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData: { user_id: 9993, raw_username: 'user9993', expire: '10/08/2035 16:00:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 9993, raw_username: 'user9993', expire: '13/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (String(url).includes('/extend')) extendCalls++; return origPost(url, body, opts); };
@@ -1717,6 +1721,7 @@ async function runFailpointTests() {
     assert.equal(extendCalls, 1, 'Em produção o POST DEVE ser disparado');
     process.env.NODE_ENV = 'test';
     delete process.env.E2E_SUPPRESS_FIRST_POST_KEY;
+    delete process.env.E2E_FAILPOINTS_ENABLED;
   });
 }
 
@@ -1726,16 +1731,15 @@ async function runFailpointTests() {
 async function runNativeMensalidadeTests() {
   console.log('\n── Seção H: Renovação Mensal Nativa Rboys (option=92) ──');
 
-  // TH-1: Mensalidade ativa: 10/08 -> alvo esperado 10/09, payload option=92, customDate vazia
-  await test('TH-1 — Mensalidade ativa (10/08 -> 10/09): envia option=92 e customDate vazia', async () => {
-    const calc = calcularDataAlvoMensalidade('10/08/2026 23:55:00');
-    assert.equal(calc.customDate, '2026-09-10');
+  await test('TH-1 — Mensalidade ativa (10/09 -> 10/10): envia option=92 e customDate vazia', async () => {
+    const calc = calcularDataAlvoMensalidade('10/09/2035 23:55:00');
+    assert.equal(calc.customDate, '2035-10-10');
 
     let capturedBody = null;
     const db = createDb();
     const cms = makeCmsClient({
-      clienteData:          { user_id: 1111, raw_username: 'u1111', expire: '10/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 1111, raw_username: 'u1111', expire: '10/09/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData:          { user_id: 1111, raw_username: 'u1111', expire: '10/09/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 1111, raw_username: 'u1111', expire: '10/10/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
@@ -1749,31 +1753,27 @@ async function runNativeMensalidadeTests() {
     assert.ok(capturedBody.includes('customDate='), 'customDate deve ser vazia');
   });
 
-  // TH-2: Mensalidade: 10/09 -> alvo 10/10
   await test('TH-2 — Mensalidade (10/09 -> 10/10): calcula alvo correto para o mês seguinte', async () => {
-    const calc = calcularDataAlvoMensalidade('10/09/2026 23:55:00');
-    assert.equal(calc.customDate, '2026-10-10');
+    const calc = calcularDataAlvoMensalidade('10/09/2035 23:55:00');
+    assert.equal(calc.customDate, '2035-10-10');
   });
 
-  // TH-3: Overflow de calendário: 31/08 -> 01/10
   await test('TH-3 — Overflow de calendário (31/08 -> 01/10): 31 de agosto vira 01 de outubro', async () => {
-    const calc = calcularDataAlvoMensalidade('31/08/2026 23:55:00');
-    assert.equal(calc.customDate, '2026-10-01');
+    const calc = calcularDataAlvoMensalidade('31/08/2035 23:55:00');
+    assert.equal(calc.customDate, '2035-10-01');
   });
 
-  // TH-4: Acesso expirado: expirou 05/08, operação 10/08 -> alvo 10/09
   await test('TH-4 — Acesso expirado: base=hoje, alvo=1 mês civil', async () => {
-    const calc = calcularDataAlvoMensalidade('05/08/2026 23:55:00');
+    const calc = calcularDataAlvoMensalidade('05/08/2035 23:55:00');
     assert.ok(calc.customDate, 'Data alvo gerada com sucesso');
   });
 
-  // TH-5: Cortesia +3: continua option=custom e customDate +3
   await test('TH-5 — Cortesia +3: envia option=custom e customDate com +3 dias', async () => {
     let capturedBody = null;
     const db = createDb();
     const cms = makeCmsClient({
-      clienteData:          { user_id: 2222, raw_username: 'u2222', expire: '10/08/2026 23:55:00', max_cons: 1, status: 'enabled' },
-      getClientsAfterExtend: [{ user_id: 2222, raw_username: 'u2222', expire: '13/08/2026 23:55:00', max_cons: 1, status: 'enabled' }]
+      clienteData:          { user_id: 2222, raw_username: 'u2222', expire: '10/08/2035 23:55:00', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 2222, raw_username: 'u2222', expire: '13/08/2035 23:55:00', max_cons: 1, status: 'enabled' }]
     });
     const origPost = cms.post.bind(cms);
     cms.post = async (url, body, opts) => { if (url.includes('/extend')) capturedBody = body; return origPost(url, body, opts); };
@@ -1784,7 +1784,223 @@ async function runNativeMensalidadeTests() {
     );
     assert.equal(res.success, true);
     assert.ok(capturedBody.includes('option=custom'), 'Cortesia deve usar option=custom');
-    assert.ok(capturedBody.includes('customDate=2026-08-13'), 'Cortesia deve enviar customDate calculada');
+    assert.ok(capturedBody.includes('customDate=2035-08-13'), 'Cortesia deve enviar customDate calculada');
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEÇÃO I — Testes do Protocolo Real GET → POST (Sprint 1 Happy Path)
+// ═══════════════════════════════════════════════════════════════════════════════
+async function runProtocolSpecificTests() {
+  console.log('\n── Seção I: Protocolo Real GET → POST (T1 a T10) ──');
+
+  await test('T1 — Happy Path GET → POST (add_screens conexões 1 → 2)', async () => {
+    let getCalled = false;
+    let postCalled = false;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8881, raw_username: 'u8881', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8881, raw_username: 'u8881', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    const origGet = cms.get.bind(cms);
+    const origPost = cms.post.bind(cms);
+    cms.get = async (url) => { if (url.includes('/extend')) getCalled = true; return origGet(url); };
+    cms.post = async (url, body, opts) => { if (url.includes('/extend')) postCalled = true; return origPost(url, body, opts); };
+
+    const db = createDb();
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '8881', usuario_acesso: 'u8881', idempotency_key: 'proto:t1', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(getCalled, true, 'GET preparatório /extend deve ter sido chamado');
+    assert.equal(postCalled, true, 'POST /extend deve ter sido chamado');
+    assert.equal(res.success, true);
+    assert.equal(res.data.connections, 2);
+  });
+
+  await test('T2 — Token CSRF específico vem do GET /extend', async () => {
+    let capturedBody = null;
+    let capturedHeaders = null;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8882, raw_username: 'u8882', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8882, raw_username: 'u8882', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    cms.get = async (url) => {
+      if (url.includes('/extend')) {
+        return { data: '<form><input name="_token" value="token-especifico-get-999"></form>', request: { res: { responseUrl: `https://cms.rboys02.click${url}` } } };
+      }
+      return { data: '<form><input name="_token" value="token-base"></form>', request: { res: { responseUrl: `https://cms.rboys02.click${url}` } } };
+    };
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) { capturedBody = body; capturedHeaders = opts.headers; }
+      return origPost(url, body, opts);
+    };
+
+    const db = createDb();
+    await extenderAcesso(
+      { identificador_fornecedor: '8882', usuario_acesso: 'u8882', idempotency_key: 'proto:t2', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.ok(capturedBody.includes('_token=token-especifico-get-999'), 'Body deve conter o token extraído do GET /extend');
+    assert.equal(capturedHeaders['X-Csrf-Token'], 'token-especifico-get-999', 'Header X-Csrf-Token deve corresponder ao token do GET');
+  });
+
+  await test('T3 — Mesma instância cmsClient / Cookie Jar preservado', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8883, raw_username: 'u8883', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8883, raw_username: 'u8883', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    const db = createDb();
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '8883', usuario_acesso: 'u8883', idempotency_key: 'proto:t3', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(res.success, true);
+  });
+
+  await test('T4 — Payload add_screens com customDate vazia e connections=2', async () => {
+    let capturedBody = null;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8884, raw_username: 'u8884', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8884, raw_username: 'u8884', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) capturedBody = body;
+      return origPost(url, body, opts);
+    };
+    const db = createDb();
+    await extenderAcesso(
+      { identificador_fornecedor: '8884', usuario_acesso: 'u8884', idempotency_key: 'proto:t4', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.ok(capturedBody.includes('option=add_screens'), 'option=add_screens deve ser enviado');
+    assert.ok(capturedBody.includes('customDate='), 'customDate deve ser string vazia');
+    assert.ok(capturedBody.includes('connections=2'), 'connections=2 deve ser enviado');
+  });
+
+  await test('T5 — Headers do POST alinhados com o navegador', async () => {
+    let capturedHeaders = null;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8885, raw_username: 'u8885', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8885, raw_username: 'u8885', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) capturedHeaders = opts.headers;
+      return origPost(url, body, opts);
+    };
+    const db = createDb();
+    await extenderAcesso(
+      { identificador_fornecedor: '8885', usuario_acesso: 'u8885', idempotency_key: 'proto:t5', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(capturedHeaders['Content-Type'], 'application/x-www-form-urlencoded');
+    assert.equal(capturedHeaders['Origin'], 'https://cms.rboys02.click');
+    assert.equal(capturedHeaders['Referer'], 'https://cms.rboys02.click/clients/8885');
+    assert.equal(capturedHeaders['X-Requested-With'], 'XMLHttpRequest');
+  });
+
+  await test('T6 — Redirect GET /extend → /login lança PANEL_SESSION_EXPIRED sem chamar POST', async () => {
+    let postCalled = false;
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8886, raw_username: 'u8886', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }
+    });
+    const origGet = cms.get.bind(cms);
+    const origPost = cms.post.bind(cms);
+    cms.get = async (url) => {
+      if (url.includes('/extend')) {
+        return { data: '<html>Login</html>', request: { res: { responseUrl: 'https://cms.rboys02.click/login' } } };
+      }
+      return origGet(url);
+    };
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) postCalled = true;
+      return origPost(url, body, opts);
+    };
+
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '8886', usuario_acesso: 'u8886', idempotency_key: 'proto:t6', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'PANEL_SESSION_EXPIRED'); return true; }
+    );
+    assert.equal(postCalled, false, 'POST /extend NÃO deve ser chamado se o GET redirecionar para /login');
+  });
+
+  await test('T7 — Redirect POST /extend → /login lança PANEL_SESSION_EXPIRED e NÃO SUPPLIER_EXTENSION_UNCERTAIN', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8887, raw_username: 'u8887', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        return { status: 200, data: '<form action="/login"><input name="_token" value="x"></form>', request: { res: { responseUrl: 'https://cms.rboys02.click/login' } } };
+      }
+      return origPost(url, body, opts);
+    };
+
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '8887', usuario_acesso: 'u8887', idempotency_key: 'proto:t7', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'PANEL_SESSION_EXPIRED'); return true; }
+    );
+    const rec = db._store.get('proto:t7');
+    assert.equal(rec.status, 'failed');
+    assert.equal(rec.erro_codigo, 'PANEL_SESSION_EXPIRED');
+  });
+
+  await test('T8 — POST success=false lança SUPPLIER_EXTENSION_FAILED (terminal failed)', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8888, raw_username: 'u8888', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      extendStatus: 200,
+      extendSuccess: false
+    });
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '8888', usuario_acesso: 'u8888', idempotency_key: 'proto:t8', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_FAILED'); return true; }
+    );
+    const rec = db._store.get('proto:t8');
+    assert.equal(rec.status, 'failed');
+  });
+
+  await test('T9 — GET-SECOND confirma connections (max_cons=1 quando esperado 2 lança uncertain)', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8889, raw_username: 'u8889', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8889, raw_username: 'u8889', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }]
+    });
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '8889', usuario_acesso: 'u8889', idempotency_key: 'proto:t9', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
+    );
+  });
+
+  await test('T10 — Expiração preservada para add_screens (expire não é alterado)', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 8890, raw_username: 'u8890', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' },
+      getClientsAfterExtend: [{ user_id: 8890, raw_username: 'u8890', expire: '13/08/2035 23:22:10', max_cons: 2, status: 'enabled' }]
+    });
+    const db = createDb();
+    const res = await extenderAcesso(
+      { identificador_fornecedor: '8890', usuario_acesso: 'u8890', idempotency_key: 'proto:t10', connections: 2, tipo: 'connections_only' },
+      { cmsClient: cms, db }
+    );
+    assert.equal(res.success, true);
+    // Vencimento de '13/08/2035 23:22:10' (BRT, -03:00) = 14/08/2035 02:22:10Z
+    assert.ok(res.data.vencimento_atual.includes('2035-08-14T02:22:10'), 'Expiração deve permanecer exatamente a original');
   });
 }
 
@@ -1804,6 +2020,7 @@ async function main() {
   await runGenericRecoveryTests();
   await runFailpointTests();
   await runNativeMensalidadeTests();
+  await runProtocolSpecificTests();
 
   console.log('\n══════════════════════════════════════════════════════');
   console.log(`  Total: ${passed + failed} | ✅ ${passed} passed | ❌ ${failed} failed`);

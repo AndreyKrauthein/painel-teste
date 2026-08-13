@@ -572,6 +572,40 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     lock_expires_at:      new Date(Date.now() + SUPPLIER_LOCK_MS).toISOString()
   });
 
+  // 10.5. GET preparatório: GET /clients/{user_id}/extend para absorção de Set-Cookie e _token específico
+  let extendCsrfToken = csrfToken;
+  try {
+    logger.info(`[extender][${idempotency_key}] Enviando GET preparatório /clients/${identificador_fornecedor}/extend...`);
+    const getExtendRes = await cmsClient.get(`/clients/${identificador_fornecedor}/extend`);
+    const getExtendUrl = getExtendRes?.request?.res?.responseUrl ||
+                         getExtendRes?.request?.responseURL ||
+                         getExtendRes?.config?.url || '';
+
+    if (
+      getExtendUrl.includes('/login') ||
+      getExtendRes.status === 419 ||
+      getExtendRes.status === 401 ||
+      getExtendRes.status === 403
+    ) {
+      logger.warn(`[extender][${idempotency_key}] GET preparatório redirecionado para /login ou negado (status ${getExtendRes?.status}, URL: ${getExtendUrl})`);
+      await atualizar(db, idempotency_key, {
+        status:                         'failed_before_call',
+        erro_codigo:                    'PANEL_SESSION_EXPIRED',
+        erro_detalhe_sanitizado:        'Sessão expirada no GET preparatório /extend'
+      });
+      throw Object.assign(new Error('PANEL_SESSION_EXPIRED'), { status: 401 });
+    }
+
+    const specificToken = extractToken(getExtendRes?.data);
+    if (specificToken) {
+      extendCsrfToken = specificToken;
+      logger.info(`[extender][${idempotency_key}] Token CSRF específico obtido do GET /extend: ${specificToken.substring(0, 8)}...`);
+    }
+  } catch (getErr) {
+    if (getErr.message === 'PANEL_SESSION_EXPIRED') throw getErr;
+    logger.warn(`[extender][${idempotency_key}] GET preparatório falhou: ${getErr.message}. Mantendo csrfToken base.`);
+  }
+
   // 11. POST /clients/{user_id}/extend
   let extendResponse;
   let mutationDispatched = false;
@@ -579,7 +613,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
 
   try {
     const body = new URLSearchParams();
-    body.append('_token', csrfToken);
+    body.append('_token', extendCsrfToken);
 
     if (isConnectionsOnly) {
       body.append('option', 'add_screens');
@@ -607,18 +641,43 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       throw new Error('E2E_SIMULATED_FIRST_POST_TIMEOUT');
     }
 
+    const baseUrl = process.env.CMS_BASE_URL || 'https://cms.rboys02.click';
+    const postHeaders = {
+      'Content-Type':     'application/x-www-form-urlencoded',
+      'Origin':           baseUrl,
+      'Referer':          `${baseUrl}/clients/${identificador_fornecedor}`,
+      'X-Csrf-Token':     extendCsrfToken,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Accept':           '*/*'
+    };
+
     mutationDispatched = true;
     extendResponse = await cmsClient.post(
       `/clients/${identificador_fornecedor}/extend`,
       body.toString(),
       {
-        headers: {
-          'Content-Type':  'application/x-www-form-urlencoded',
-          'X-CSRF-TOKEN':  csrfToken
-        }
+        headers: postHeaders
       }
     );
+
+    const finalPostUrl = extendResponse?.request?.res?.responseUrl ||
+                         extendResponse?.request?.responseURL ||
+                         extendResponse?.config?.url || '';
+
+    const isHtmlLogin = typeof extendResponse?.data === 'string' &&
+      (extendResponse.data.includes('/login') && extendResponse.data.includes('name="_token"'));
+
+    if (finalPostUrl.includes('/login') || isHtmlLogin) {
+      logger.warn(`[extender][${idempotency_key}] POST /extend redirecionou para /login (sessão expirada). URL final: ${finalPostUrl}`);
+      await atualizar(db, idempotency_key, {
+        status:                  'failed',
+        erro_codigo:             'PANEL_SESSION_EXPIRED',
+        erro_detalhe_sanitizado: 'POST /extend redirecionado para /login'
+      });
+      throw Object.assign(new Error('PANEL_SESSION_EXPIRED'), { status: 401 });
+    }
   } catch (networkErr) {
+    if (networkErr.message === 'PANEL_SESSION_EXPIRED') throw networkErr;
     logger.warn(`[extender][${idempotency_key}] Erro no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
     await atualizar(db, idempotency_key, {
       status:                         'uncertain',
