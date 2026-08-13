@@ -122,14 +122,7 @@ async function buscarCliente(cmsClient, usuario_acesso, identificador_fornecedor
   return cliente;
 }
 
-/**
- * Verifica se o registro confirmado satisfaz todos os critérios de confirmação.
- * - user_id correto
- * - max_cons preservado e > 0
- * - data civil BRT do expire >= customDate
- * - status operacional
- */
-export function confirmarCriterios(cliente, identificador_fornecedor, connections, customDate) {
+export function confirmarCriterios(cliente, identificador_fornecedor, connections, customDate, isConnectionsOnlyMode = false) {
   const isUserIdOk     = String(cliente.user_id).trim() === String(identificador_fornecedor).trim();
   const isConnectionsOk = Number(cliente.max_cons) === Number(connections) && Number(cliente.max_cons) > 0;
   const isStatusOk     = isSupplierStatusOperational(cliente.status);
@@ -140,7 +133,12 @@ export function confirmarCriterios(cliente, identificador_fornecedor, connection
     const expireBrtStr = new Intl.DateTimeFormat('sv-SE', {
       timeZone: 'America/Sao_Paulo'
     }).format(expireDate);
-    isDateOk = expireBrtStr >= customDate;
+    
+    if (isConnectionsOnlyMode) {
+      isDateOk = true; // No modo de apenas conexões, a confirmação foca em max_cons e user_id
+    } else {
+      isDateOk = expireBrtStr >= customDate;
+    }
   }
 
   return {
@@ -400,7 +398,8 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   }
 
   const isMensalidade = tipoParam === 'mensalidade' || tipoExtensaoParam === 'mensalidade' || (idempotency_key && idempotency_key.startsWith('mp_mensal_renovacao:'));
-  const tipoOp = isMensalidade ? 'extensao_mensalidade' : TIPO;
+  const isConnectionsOnly = tipoParam === 'connections_only' || tipoExtensaoParam === 'connections_only';
+  const tipoOp = isConnectionsOnly ? 'atualizacao_conexoes' : (isMensalidade ? 'extensao_mensalidade' : TIPO);
 
   // 2. Hash obrigatório do payload imutável
   const requestHash = computeRequestHash(tipoOp, identificador_fornecedor, usuario_acesso);
@@ -538,7 +537,12 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   let customDate = customDateParam || customDateParamAlt;
   let dataBaseISO;
 
-  if (isMensalidade) {
+  if (isConnectionsOnly) {
+    // Em modo connections_only, a data-alvo esperada é exatamente a data de vencimento civil BRT atual (preservação temporal)
+    const expireBrtStr = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' }).format(expireDate);
+    customDate = expireBrtStr;
+    dataBaseISO = expireDate.toISOString();
+  } else if (isMensalidade) {
     const calc = calcularDataAlvoMensalidade(expireRaw);
     customDate = calc.customDate; // Para mensalidade, o alvo de auditoria no DB é SEMPRE o +1 mês civil nativo
     dataBaseISO = calc.base.toISOString();
@@ -552,6 +556,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   }
 
   const vencimentoAnteriorISO = expireDate.toISOString();
+  const desiredConnections = Number.isInteger(Number(params.connections)) && Number(params.connections) > 0 ? Number(params.connections) : maxCons;
 
   // Helper para cálculo da disponibilidade do retry controlado em caso de uncertain
   const RETRY_AVAIL_MS = process.env.NODE_ENV === 'test' ? 0 : 5 * 60 * 1000;
@@ -563,7 +568,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     vencimento_anterior:  vencimentoAnteriorISO,
     data_base:            dataBaseISO, // GRAVADO OBRIGATORIAMENTE ANTES DO 1º POST
     custom_date:          customDate, // Para mensalidade, custom_date representa a data-alvo esperada para auditoria/recovery
-    connections:          maxCons,
+    connections:          desiredConnections,
     lock_expires_at:      new Date(Date.now() + SUPPLIER_LOCK_MS).toISOString()
   });
 
@@ -576,7 +581,10 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     const body = new URLSearchParams();
     body.append('_token', csrfToken);
 
-    if (isMensalidade) {
+    if (isConnectionsOnly) {
+      body.append('option', 'add_screens');
+      body.append('customDate', '');
+    } else if (isMensalidade) {
       body.append('option', '92');
       body.append('customDate', '');
     } else {
@@ -584,17 +592,18 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       body.append('customDate', customDate);
     }
 
-    body.append('connections', String(maxCons));
+    body.append('connections', String(desiredConnections));
 
-    logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend (isMensalidade: ${isMensalidade}, option: ${isMensalidade ? '92' : 'custom'}). target: ${customDate}, max_cons: ${maxCons}`);
+    logger.info(`[extender][${idempotency_key}] Enviando POST /clients/${identificador_fornecedor}/extend (isConnectionsOnly: ${isConnectionsOnly}, isMensalidade: ${isMensalidade}, option: ${isConnectionsOnly ? 'add_screens' : (isMensalidade ? '92' : 'custom')}). target: ${customDate}, connections: ${desiredConnections}`);
 
-    // Instrumentação de Homologação DEV/E2E: Trava FAIL-CLOSED estrita (Exige E2E_FAILPOINTS_ENABLED=true E escopo obrigatório por idempotency_key)
+    // Instrumentação de Homologação DEV/E2E: Trava FAIL-CLOSED estrita (Exige E2E_FAILPOINTS_ENABLED=true E escopo obrigatório por idempotency_key E ONE-SHOT na 1ª tentativa)
     const isFailpointsEnabled = process.env.NODE_ENV !== 'production' && process.env.E2E_FAILPOINTS_ENABLED === 'true';
     const isTargetKey = Boolean(process.env.E2E_SUPPRESS_FIRST_POST_KEY && idempotency_key === process.env.E2E_SUPPRESS_FIRST_POST_KEY);
-    const isE2ESuppressFirstPost = isFailpointsEnabled && isTargetKey;
+    const isFirstAttempt = !operacao?.retry_controlado_executado_em;
+    const isE2ESuppressFirstPost = isFailpointsEnabled && isTargetKey && isFirstAttempt;
 
     if (isE2ESuppressFirstPost) {
-      logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO (SERVER-ONLY & STRICT-KEY): Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
+      logger.warn(`[extender][${idempotency_key}] E2E FAILPOINT ATIVO (SERVER-ONLY & STRICT-KEY & ONE-SHOT): Suprimindo o primeiro POST ao fornecedor para simular falha ambígua inicial.`);
       throw new Error('E2E_SIMULATED_FIRST_POST_TIMEOUT');
     }
 
@@ -683,7 +692,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
       cmsClient, usuario_acesso, identificador_fornecedor, csrfConf
     );
     const conf = confirmarCriterios(
-      clienteConfirmado, identificador_fornecedor, maxCons, customDate
+      clienteConfirmado, identificador_fornecedor, desiredConnections, customDate, isConnectionsOnly
     );
 
     logger.info(`[extender][${idempotency_key}] Critérios de confirmação: ${JSON.stringify(conf.detalhes)}`);
@@ -720,7 +729,7 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     data_base:                expireDate.toISOString(),
     data_solicitada:          customDate,
     vencimento_atual:         novoExpire.toISOString(),
-    connections:              maxCons,
+    connections:              desiredConnections,
     status_fornecedor:        clienteConfirmado.status,
     evidence: {
       mutationDispatched: true,
