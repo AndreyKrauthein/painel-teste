@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/clients.test.js"
+    "test": "node test/clients.test.js && node test/extender.test.js && node test/server.test.js"
   },
   "keywords": [
     "iptv",
