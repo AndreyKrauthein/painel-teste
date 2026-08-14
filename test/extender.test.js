@@ -2004,6 +2004,118 @@ async function runProtocolSpecificTests() {
   });
 }
 
+async function runObservabilityTests() {
+  console.log('\n--- Testes de Observabilidade HTTP 400 Sanitizada ---');
+
+  await test('Obs 1 — HTTP 400 JSON grava detalhe sanitizado sem segredos', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9901, raw_username: 'u9901', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        const err = Object.assign(new Error('Request failed with status code 400'), {
+          response: {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+            data: { message: 'Invalido _token=abc123secret' },
+            config: { url: 'https://cms.rboys02.click/clients/9901/extend' }
+          }
+        });
+        throw err;
+      }
+      return origPost(url, body, opts);
+    };
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '9901', usuario_acesso: 'u9901', idempotency_key: 'obs:t1', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
+    );
+
+    const rec = await lerOperacao(db, 'obs:t1');
+    assert.equal(rec.status, 'uncertain');
+    assert.equal(rec.erro_codigo, 'SUPPLIER_EXTENSION_UNCERTAIN');
+    assert.ok(rec.erro_detalhe_sanitizado.includes('"http_status":400'), 'Deve conter http_status 400');
+    assert.ok(rec.erro_detalhe_sanitizado.includes('[REDACTED]'), 'Deve sanitizar o token no body');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('abc123secret'), 'Não deve vazar o valor do token');
+  });
+
+  await test('Obs 2 — HTTP 400 HTML aplica limite de tamanho e remove segredos', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9902, raw_username: 'u9902', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        const hugeHtml = `<html><body><form><input name="_token" value="secret_csrf_xyz"></form>${'A'.repeat(5000)}</body></html>`;
+        const err = Object.assign(new Error('Request failed with status code 400'), {
+          response: {
+            status: 400,
+            headers: { 'content-type': 'text/html' },
+            data: hugeHtml,
+            config: { url: 'https://cms.rboys02.click/clients/9902/extend' }
+          }
+        });
+        throw err;
+      }
+      return origPost(url, body, opts);
+    };
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '9902', usuario_acesso: 'u9902', idempotency_key: 'obs:t2', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
+    );
+
+    const rec = await lerOperacao(db, 'obs:t2');
+    assert.ok(rec.erro_detalhe_sanitizado.length <= 4000, 'Deve limitar o tamanho sanitizado');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('secret_csrf_xyz'), 'Deve redactar segredos no HTML');
+  });
+
+  await test('Obs 3 — Redação estrita de cookies e tokens sensíveis', async () => {
+    const cms = makeCmsClient({
+      clienteData: { user_id: 9903, raw_username: 'u9903', expire: '13/08/2035 23:22:10', max_cons: 1, status: 'enabled' }
+    });
+    const origPost = cms.post.bind(cms);
+    cms.post = async (url, body, opts) => {
+      if (url.includes('/extend')) {
+        const err = Object.assign(new Error('Request failed with status code 400'), {
+          response: {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+            data: {
+              cookie: 'mundogf_session=sess123; XSRF-TOKEN=xsrf123',
+              auth: 'Authorization=Bearer secret_token_abc'
+            },
+            config: { url: 'https://cms.rboys02.click/clients/9903/extend?_token=secret_in_url' }
+          }
+        });
+        throw err;
+      }
+      return origPost(url, body, opts);
+    };
+    const db = createDb();
+    await assert.rejects(
+      () => extenderAcesso(
+        { identificador_fornecedor: '9903', usuario_acesso: 'u9903', idempotency_key: 'obs:t3', connections: 2, tipo: 'connections_only' },
+        { cmsClient: cms, db }
+      ),
+      (err) => { assert.equal(err.message, 'SUPPLIER_EXTENSION_UNCERTAIN'); return true; }
+    );
+
+    const rec = await lerOperacao(db, 'obs:t3');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('sess123'), 'Não deve vazar mundogf_session');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('xsrf123'), 'Não deve vazar XSRF-TOKEN');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('secret_token_abc'), 'Não deve vazar Bearer token');
+    assert.ok(!rec.erro_detalhe_sanitizado.includes('secret_in_url'), 'Não deve vazar _token na URL');
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXECUÇÃO
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2021,6 +2133,7 @@ async function main() {
   await runFailpointTests();
   await runNativeMensalidadeTests();
   await runProtocolSpecificTests();
+  await runObservabilityTests();
 
   console.log('\n══════════════════════════════════════════════════════');
   console.log(`  Total: ${passed + failed} | ✅ ${passed} passed | ❌ ${failed} failed`);

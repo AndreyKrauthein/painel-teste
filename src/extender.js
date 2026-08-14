@@ -419,6 +419,49 @@ export async function extenderAcesso(params, { cmsClient, db }) {
     throw err; // IDEMPOTENCY_RESERVATION_FAILED
   }
 
+function sanitizeErrorDetail(networkErr, stage = 'POST_EXTEND') {
+  const status = networkErr?.response?.status || null;
+  const contentType = networkErr?.response?.headers?.['content-type'] || null;
+  const url = networkErr?.response?.config?.url || networkErr?.config?.url || '';
+
+  const redactSecrets = (text) => {
+    if (!text || typeof text !== 'string') return text;
+    return text
+      .replace(/Bearer\s+[^\s"'\\]+/gi, 'Bearer [REDACTED]')
+      .replace(/(_token|XSRF-TOKEN|mundogf_session|X-Csrf-Token|password|senha|secret|token)=([^&"'\s\\]+)/gi, '$1=[REDACTED]')
+      .replace(/(input[^>]*name=["'](_token|XSRF-TOKEN|mundogf_session)["'][^>]*value=["'])([^"']+)(["'])/gi, '$1[REDACTED]$4')
+      .replace(/(["'](_token|XSRF-TOKEN|mundogf_session|X-Csrf-Token|Authorization|password|senha)["']\s*:\s*["'])([^"']+)(["'])/gi, '$1[REDACTED]$4');
+  };
+
+  let responseBody = null;
+  const rawData = networkErr?.response?.data;
+
+  if (rawData !== undefined && rawData !== null) {
+    if (typeof rawData === 'object') {
+      try {
+        const jsonStr = JSON.stringify(rawData);
+        responseBody = redactSecrets(jsonStr).substring(0, 3000);
+      } catch (e) {
+        responseBody = String(rawData).substring(0, 3000);
+      }
+    } else {
+      const str = String(rawData);
+      responseBody = redactSecrets(str).substring(0, 3000);
+    }
+  }
+
+  const detailObj = {
+    stage,
+    http_status: status,
+    url: url ? url.replace(/([?&]_token=)[^&]+/g, '$1[REDACTED]') : '',
+    content_type: contentType,
+    error_message: networkErr?.message || 'Unknown network error',
+    response_body: responseBody
+  };
+
+  return JSON.stringify(detailObj);
+}
+
   const { created, operacao } = reserva;
 
   // 4. Detecção de re-uso de chave com payload diferente
@@ -679,10 +722,11 @@ export async function extenderAcesso(params, { cmsClient, db }) {
   } catch (networkErr) {
     if (networkErr.message === 'PANEL_SESSION_EXPIRED') throw networkErr;
     logger.warn(`[extender][${idempotency_key}] Erro no POST /extend: ${networkErr.message}. mutationDispatched: ${mutationDispatched}`);
+    const detalheSanitizado = sanitizeErrorDetail(networkErr, 'POST_EXTEND');
     await atualizar(db, idempotency_key, {
       status:                         'uncertain',
       erro_codigo:                    'SUPPLIER_EXTENSION_UNCERTAIN',
-      erro_detalhe_sanitizado:        `Erro no POST /extend: ${networkErr.message}`,
+      erro_detalhe_sanitizado:        detalheSanitizado,
       retry_controlado_disponivel_em: getRetryDisponivelEm()
     });
     throw Object.assign(new Error('SUPPLIER_EXTENSION_UNCERTAIN'), { status: 202 });
