@@ -688,7 +688,7 @@ function sanitizeErrorDetail(networkErr, stage = 'POST_EXTEND') {
     const postHeaders = {
       'Content-Type':     'application/x-www-form-urlencoded',
       'Origin':           baseUrl,
-      'Referer':          `${baseUrl}/clients/${identificador_fornecedor}/extend`,
+      'Referer':          `${baseUrl}/clients/${identificador_fornecedor}`,
       'X-Csrf-Token':     extendCsrfToken,
       'X-Requested-With': 'XMLHttpRequest',
       'Accept':           '*/*'

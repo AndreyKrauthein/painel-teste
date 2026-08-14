@@ -1897,7 +1897,7 @@ async function runProtocolSpecificTests() {
     );
     assert.equal(capturedHeaders['Content-Type'], 'application/x-www-form-urlencoded');
     assert.equal(capturedHeaders['Origin'], 'https://cms.rboys02.click');
-    assert.equal(capturedHeaders['Referer'], 'https://cms.rboys02.click/clients/8885/extend');
+    assert.equal(capturedHeaders['Referer'], 'https://cms.rboys02.click/clients/8885');
     assert.equal(capturedHeaders['X-Requested-With'], 'XMLHttpRequest');
   });
 
