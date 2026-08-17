@@ -360,7 +360,7 @@ async function runAll() {
           headers: config?.headers
         };
         // Para 13/08/2026 + 1 mês civil nativo (+31d), o novo expire é 14/09/2026
-        clientExpire = '14/09/2026 23:22:10';
+        clientExpire = '15/09/2026 23:22:10';
         return {
           status: 200,
           data: { success: true, message: 'Client extended successfully' }

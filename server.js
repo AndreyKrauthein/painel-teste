@@ -15,6 +15,7 @@ import { startKeepAliveJob, checkSessionHealth } from './src/keepAlive.js';
 import { getGenerationStats } from './src/stats.js';
 import { resolverClienteFornecedor } from './src/clients.js';
 import { extenderAcesso, recuperarOperacoesExpiradas } from './src/extender.js';
+import { gerarAcesso } from './src/generator.js';
 import supabaseAdmin from './src/supabaseAdmin.js';
 
 dotenv.config();
@@ -338,179 +339,55 @@ fastify.get('/admin/stats', { preHandler: checkAuth }, async (request, reply) =>
  * Authenticated. Generates an IPTV test and returns structured credentials.
  */
 fastify.post('/gerar-teste', { preHandler: checkAuth }, async (request, reply) => {
-  // 1. Memory Concurrency Check
-  if (!acquireSlot()) {
-    logger.warn('Bloqueio por limite de concorrência ativa.');
-    return reply.status(429).send({
-      success: false,
-      error: 'Muitas solicitações no momento. Tente novamente em alguns segundos.',
-      action: 'try_again'
-    });
-  }
+  const { 
+    telefone = '', 
+    plano = parseInt(process.env.DEFAULT_PLAN || '90', 10), 
+    notes = '',
+    mac_address,
+    idempotency_key,
+    request_hash,
+    usuario_id,
+    dispositivo_id,
+    acesso_provisionado_id
+  } = request.body || {};
 
   try {
-    const { 
-      telefone = '', 
-      plano = parseInt(process.env.DEFAULT_PLAN || '90', 10), 
-      notes = '' 
-    } = request.body || {};
+    const result = await gerarAcesso(
+      { telefone, plano, notes, mac_address, idempotency_key, request_hash, usuario_id, dispositivo_id, acesso_provisionado_id },
+      { cmsClient, db: supabaseAdmin }
+    );
 
-    logger.info(`Iniciando geração de teste. Telefone: ${telefone || 'Não informado'}, Plano: ${plano}`);
-
-    // Check session existence
-    const session = await loadSession();
-    if (!session) {
-      return reply.status(400).send({
-        success: false,
-        error: 'Sessão expirada. Atualize a sessão.',
-        action: 'session_expired'
-      });
-    }
-
-    // 2. Fetch /clients/simpletest to get fresh CSRF token
-    logger.info('Carregando formulário de teste para obter token CSRF...');
-    let simpleTestResponse;
-    try {
-      simpleTestResponse = await cmsClient.get('/clients/simpletest');
-    } catch (err) {
-      logger.error('Falha ao acessar /clients/simpletest:', err.message);
-      return reply.status(500).send({
-        success: false,
-        error: 'Não foi possível gerar o teste agora.',
-        action: 'fallback_whatsapp'
-      });
-    }
-
-    const simpleTestUrl = simpleTestResponse.request?.res?.responseUrl || '';
-    if (
-      simpleTestUrl.includes('/login') ||
-      simpleTestResponse.status === 419 ||
-      simpleTestResponse.status === 401 ||
-      simpleTestResponse.status === 403
-    ) {
-      logger.warn('Sessão expirou no momento da geração do teste (redirecionado ou status inválido).');
-      await updateStatus(false, 'Sessão expirada.');
-      return reply.status(400).send({
-        success: false,
-        error: 'Sessão expirada. Atualize a sessão.',
-        action: 'session_expired'
-      });
-    }
-
-    const htmlForm = simpleTestResponse.data;
-    const token = extractToken(htmlForm);
-
-    if (!token) {
-      logger.warn('Token CSRF não localizado. Abortando geração.');
-      await updateStatus(false, 'Sessão expirada (token ausente).');
-      return reply.status(400).send({
-        success: false,
-        error: 'Sessão expirada. Atualize a sessão.',
-        action: 'session_expired'
-      });
-    }
-
-    // 3. Make POST /clients/generatetest
-    logger.info('Enviando dados de geração de teste...');
-    const formData = new URLSearchParams();
-    formData.append('_token', token);
-    formData.append('plans', plano.toString());
-    formData.append('notes', notes);
-
-    let generateResponse;
-    try {
-      generateResponse = await cmsClient.post('/clients/generatetest', formData, {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
-      });
-    } catch (err) {
-      logger.error('Falha na requisição POST /clients/generatetest:', err.message);
-      return reply.status(500).send({
-        success: false,
-        error: 'Não foi possível gerar o teste agora.',
-        action: 'fallback_whatsapp'
-      });
-    }
-
-    // Verify response URL or body to check for redirects to login
-    const finalUrl = generateResponse.request?.res?.responseUrl || '';
-    if (finalUrl.includes('/login')) {
-      logger.warn('Sessão expirada após envio do formulário de geração (redirecionado para login).');
-      await updateStatus(false, 'Sessão expirada.');
-      return reply.status(400).send({
-        success: false,
-        error: 'Sessão expirada. Atualize a sessão.',
-        action: 'session_expired'
-      });
-    }
-
-    // 4. Parse response HTML
-    logger.info('Analisando resultado da geração...');
-    const testData = extractTestData(generateResponse.data);
-
-    // If parse didn't find usuario or link_lista, something went wrong (like IPTV panel limit reached, daily quota, etc.)
-    if (!testData.usuario || !testData.link_lista) {
-      logger.error('Falha ao extrair credenciais do HTML retornado pelo painel (pode ser limite excedido, cota diária ou alteração de layout).');
-      return reply.status(500).send({
-        success: false,
-        error: 'Não foi possível gerar o teste agora.',
-        action: 'fallback_whatsapp'
-      });
-    }
-
-    // 5. Resolve internal client ID using getClients
-    testData.identificador_fornecedor = null;
-    let resolvedClient = null;
-    try {
-      resolvedClient = await resolverClienteFornecedor(testData.usuario, cmsClient);
-      testData.identificador_fornecedor = resolvedClient.user_id;
-
-      // Conferência de vencimento
-      const genVencISO = parseBrazilianDate(testData.vencimento);
-      const clientsVencISO = parseBrazilianDate(resolvedClient.expires);
-      if (genVencISO && clientsVencISO) {
-        const diffMs = Math.abs(new Date(genVencISO).getTime() - new Date(clientsVencISO).getTime());
-        if (diffMs > 5000) {
-          logger.warn(`[Vencimento] Divergência detectada entre generatetest (${testData.vencimento}) e getClients (${resolvedClient.expires})`);
-        }
-      }
-    } catch (err) {
-      logger.error(`[Reconciliação Requerida] Falha ao resolver ID interno para o usuário '${testData.usuario}': ${err.message}`);
-      testData.reconciliacao_requerida = true;
-      testData.reconciliacao_erro = err.message;
-    }
-
-    // 6. Save history to data/generated-tests.jsonl (No password saved)
-    try {
-      const historyPath = path.resolve('data/generated-tests.jsonl');
-      const historyEntry = JSON.stringify({
-        telefone: telefone || 'Não informado',
-        plano: plano,
-        usuario: testData.usuario,
-        url: testData.url || '',
-        vencimento: testData.vencimento,
-        identificador_fornecedor: testData.identificador_fornecedor,
-        createdAt: new Date().toISOString()
-      }) + '\n';
-      
-      await fs.appendFile(historyPath, historyEntry, 'utf-8');
-      logger.info('Geração gravada no arquivo de histórico.');
-    } catch (err) {
-      // Don't fail the request if writing history fails, just log it
-      logger.error('Erro ao salvar histórico de geração localmente:', err.message);
-    }
-
-    // 7. Return Success Response
-    logger.info('Teste gerado com sucesso!');
-    return {
+    return reply.status(200).send({
       success: true,
-      data: testData
-    };
+      cached: Boolean(result.cached),
+      data: result.data
+    });
 
-  } finally {
-    // Always release the concurrency slot
-    releaseSlot();
+  } catch (err) {
+    const code = err.message;
+    const httpStatus = err.status ?? 500;
+
+    const expectedCodes = [
+      'PANEL_SESSION_EXPIRED', 'PANEL_CSRF_UNAVAILABLE',
+      'SUPPLIER_CLIENT_NOT_FOUND', 'SUPPLIER_CLIENT_AMBIGUOUS',
+      'GENERATION_TIMEOUT', 'SUPPLIER_PARSE_FAILED',
+      'IDEMPOTENCY_KEY_REUSED', 'IDEMPOTENCY_IN_PROGRESS', 'IDEMPOTENCY_RESERVATION_FAILED',
+      'AMBIGUOUS_CREATION_PASSWORD_UNAVAILABLE', 'SUPABASE_PERSIST_FAILED',
+      'INVALID_REQUEST'
+    ];
+
+    if (!expectedCodes.includes(code)) {
+      logger.error('[/gerar-teste] Erro inesperado:', err);
+    } else {
+      logger.warn(`[/gerar-teste] Erro controlado: ${code} (status ${httpStatus})`);
+    }
+
+    return reply.status(httpStatus).send({
+      success: false,
+      error: err.message,
+      code: err.message,
+      action: err.action || (code === 'PANEL_SESSION_EXPIRED' ? 'session_expired' : 'try_again')
+    });
   }
 });
 
